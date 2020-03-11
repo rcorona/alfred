@@ -8,6 +8,8 @@ import numpy as np
 from torch import nn
 from tensorboardX import SummaryWriter
 from tqdm import trange
+from torch.utils.data import Dataset, DataLoader
+import pdb
 
 class Module(nn.Module):
 
@@ -88,7 +90,7 @@ class Module(nn.Module):
             p_train = {}
             total_train_loss = list()
             random.shuffle(train) # shuffle every epoch
-            for batch, feat in self.iterate(train, args.batch):
+            for batch, feat in self.iterate(train, args.batch, args.subgoal):
                 out = self.forward(feat)
                 preds = self.extract_preds(out, batch, feat)
                 p_train.update(preds)
@@ -109,12 +111,15 @@ class Module(nn.Module):
                 total_train_loss.append(float(sum_loss))
                 train_iter += self.args.batch
 
+            
+            print('\ntrain metrics\n')
             # compute metrics for train
             m_train = {k: sum(v) / len(v) for k, v in m_train.items()}
             m_train.update(self.compute_metric(p_train, train))
             m_train['total_loss'] = sum(total_train_loss) / len(total_train_loss)
             self.summary_writer.add_scalar('train/total_loss', m_train['total_loss'], train_iter)
 
+            print('\nvalid seen\n')
             # compute metrics for valid_seen
             p_valid_seen, valid_seen_iter, total_valid_seen_loss, m_valid_seen = self.run_pred(valid_seen, args=args, name='valid_seen', iter=valid_seen_iter)
             m_valid_seen.update(self.compute_metric(p_valid_seen, valid_seen))
@@ -122,6 +127,7 @@ class Module(nn.Module):
             self.summary_writer.add_scalar('valid_seen/total_loss', m_valid_seen['total_loss'], valid_seen_iter)
 
             # compute metrics for valid_unseen
+            print('\nvalid unseen\n')
             p_valid_unseen, valid_unseen_iter, total_valid_unseen_loss, m_valid_unseen = self.run_pred(valid_unseen, args=args, name='valid_unseen', iter=valid_unseen_iter)
             m_valid_unseen.update(self.compute_metric(p_valid_unseen, valid_unseen))
             m_valid_unseen['total_loss'] = float(total_valid_unseen_loss)
@@ -205,10 +211,11 @@ class Module(nn.Module):
         self.eval()
         total_loss = list()
         dev_iter = iter
-        for batch, feat in self.iterate(dev, args.batch):
+        for batch, feat in self.iterate(dev, args.batch, args.subgoal):
             out = self.forward(feat)
             preds = self.extract_preds(out, batch, feat)
             p_dev.update(preds)
+            #pdb.set_trace()
             loss = self.compute_loss(out, batch, feat)
             for k, v in loss.items():
                 ln = 'loss_' + k
@@ -253,13 +260,64 @@ class Module(nn.Module):
             }
         return debug
 
-    def load_task_json(self, task):
+    def load_task_json(self, task, subgoal=None):
         '''
         load preprocessed json from disk
         '''
         json_path = os.path.join(self.args.data, task['task'], '%s' % self.args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
         with open(json_path) as f:
             data = json.load(f)
+
+        if subgoal is not None: 
+            data = self.filter_subgoal(data, subgoal)
+
+        return data
+
+    def filter_subgoal(self, data, subgoal_name): 
+        '''
+        Filter a loaded json to only include examples from a specific type of subgoal. 
+        '''
+        # First get idx of segments where specified subgoal takes place. 
+        valid_idx = set()
+        
+        for subgoal in data['plan']['high_pddl']:
+            
+            curr_subgoal = subgoal['discrete_action']['action']
+
+            if curr_subgoal == subgoal_name or curr_subgoal == 'NoOp': 
+                valid_idx.add(subgoal['high_idx'])
+
+        if len(valid_idx) == 0: 
+            return None
+
+        # Filter language instructions. 
+        try: 
+            data['num']['lang_instr'] = [data['num']['lang_instr'][idx] for idx in (valid_idx - set([max(valid_idx)]))]
+        except: 
+            pdb.set_trace()
+            exit()
+
+        # Filter low level actions. 
+        data['plan']['low_actions'] = [a for a in data['plan']['low_actions'] if a['high_idx'] in valid_idx]
+
+        # Filter images. 
+        data['images'] = [img for img in data['images'] if img['high_idx'] in valid_idx]
+        
+        # Fix image idx. 
+        low_idxs = sorted(list(set([img['low_idx'] for img in data['images']])))
+        
+        for img in data['images']: 
+            img['low_idx'] = low_idxs.index(img['low_idx'])
+
+        # Filter action-low.
+        for i in range(len(data['num']['action_low'])): 
+            data['num']['action_low'][i] = [a for a in data['num']['action_low'][i] if a['high_idx'] in valid_idx]
+
+        data['num']['action_low'] = [a for a in data['num']['action_low'] if len(a) > 0]
+
+        #pdb.set_trace()
+        #exit()
+
         return data
 
     def get_task_root(self, ex):
@@ -268,13 +326,18 @@ class Module(nn.Module):
         '''
         return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
-    def iterate(self, data, batch_size):
+    def iterate(self, data, batch_size, subgoal=None):
         '''
         breaks dataset into batch_size chunks for training
         '''
         for i in trange(0, len(data), batch_size, desc='batch'):
             tasks = data[i:i+batch_size]
-            batch = [self.load_task_json(task) for task in tasks]
+            batch = [self.load_task_json(task, subgoal) for task in tasks]
+            batch = [b for b in batch if b is not None]
+
+            if len(batch) == 0: 
+                raise
+
             feat = self.featurize(batch)
             yield batch, feat
 

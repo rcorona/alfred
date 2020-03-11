@@ -9,7 +9,7 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
-
+import pdb
 
 class Module(Base):
 
@@ -65,6 +65,7 @@ class Module(Base):
         tensorize and pad batch input
         '''
         device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
+        #device = torch.device('cpu')
         feat = collections.defaultdict(list)
 
         for ex in batch:
@@ -129,7 +130,6 @@ class Module(Base):
                 # low-level valid interact
                 feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
 
-
         # tensorization and padding
         for k, v in feat.items():
             if k in {'lang_goal_instr'}:
@@ -179,6 +179,7 @@ class Module(Base):
 
 
     def forward(self, feat, max_decode=300):
+        #pdb.set_trace()
         cont_lang, enc_lang = self.encode_lang(feat)
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])

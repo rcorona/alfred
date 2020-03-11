@@ -182,6 +182,7 @@ class ConvFrameMaskDecoder(nn.Module):
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'state_t': state_t
         }
+
         return results
 
 
