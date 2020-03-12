@@ -83,14 +83,17 @@ class Eval(object):
         # start threads
         threads = []
         lock = self.manager.Lock()
-        for n in range(self.args.num_threads):
-            thread = mp.Process(target=self.run, args=(self.model, self.resnet, task_queue, self.args, lock,
-                                                       self.successes, self.failures, self.results))
-            thread.start()
-            threads.append(thread)
+        if self.args.num_threads > 1:
+            for n in range(self.args.num_threads):
+                thread = mp.Process(target=self.run, args=(self.model, self.resnet, task_queue, self.args, lock,
+                                                           self.successes, self.failures, self.results))
+                thread.start()
+                threads.append(thread)
 
-        for t in threads:
-            t.join()
+            for t in threads:
+                t.join()
+        else:
+            self.run(self.model, self.resnet, task_queue, self.args, lock, self.successes, self.failures, self.results)
 
         # save
         self.save_results()

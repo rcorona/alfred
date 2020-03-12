@@ -7,11 +7,10 @@ from eval import Eval
 from env.thor_env import ThorEnv
 
 
-class EvalTask(Eval):
+class EvalBenchmark(Eval):
     '''
     evaluate overall task performance
     '''
-
     @classmethod
     def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
         '''
@@ -51,7 +50,7 @@ class EvalTask(Eval):
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
         # extract language features
-        feat = model.featurize([traj_data], load_mask=False)
+        feat = model.featurize([traj_data] * args.benchmark_batch_size, load_mask=False)
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']
@@ -68,11 +67,11 @@ class EvalTask(Eval):
             # extract visual features
             curr_image = Image.fromarray(np.uint8(env.last_event.frame))
             # batch_size x T x 512 x 7 x 7
-            feat['frames'] = resnet.featurize([curr_image], batch=1).unsqueeze(1)
+            feat['frames'] = resnet.featurize([curr_image] * args.benchmark_batch_size, batch=args.benchmark_batch_size).unsqueeze(1)
 
             # forward model
             m_out = model.step(feat)
-            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+            m_pred = model.extract_preds(m_out, [traj_data] * args.benchmark_batch_size, feat, clean_special_tokens=False)
             m_pred = list(m_pred.values())[0]
 
             # check if <<stop>> was predicted

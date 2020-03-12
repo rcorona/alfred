@@ -8,6 +8,7 @@ import argparse
 import torch.multiprocessing as mp
 from eval_task import EvalTask
 from eval_subgoals import EvalSubgoals
+from eval_benchmark import EvalBenchmark
 
 
 if __name__ == '__main__':
@@ -40,18 +41,26 @@ if __name__ == '__main__':
     parser.add_argument('--skip_model_unroll_with_expert', action='store_true', help='forward model with expert actions')
     parser.add_argument('--no_teacher_force_unroll_with_expert', action='store_true', help='no teacher forcing with expert')
 
+    parser.add_argument('--modular_subgoals', action='store_true', help='this model was trained with the --subgoal argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--fast_epoch', dest='fast_epoch', action='store_true')
 
+    parser.add_argument('--benchmark', action='store_true')
+    parser.add_argument('--benchmark_batch_size', type=int, default=1)
+
     # parse arguments
     args = parser.parse_args()
 
-    # eval mode
-    if args.subgoals:
-        eval = EvalSubgoals(args, manager)
+    if args.benchmark:
+        eval = EvalBenchmark(args, manager)
     else:
-        eval = EvalTask(args, manager)
+        # eval mode
+        if args.subgoals:
+            eval = EvalSubgoals(args, manager)
+        else:
+            eval = EvalTask(args, manager)
 
     # start threads
     eval.spawn_threads()

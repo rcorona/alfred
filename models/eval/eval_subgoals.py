@@ -42,11 +42,22 @@ class EvalSubgoals(Eval):
 
             try:
                 traj = model.load_task_json(task)
+                if args.modular_subgoals:
+                    filtered_traj_by_subgoal = {
+                        subgoal: model.load_task_json(task, subgoal)
+                        for subgoal in subgoals_to_evaluate
+                    }
+                else:
+                    filtered_traj_by_subgoal = None
                 r_idx = task['repeat_idx']
-                subgoal_idxs = [sg['high_idx'] for sg in traj['plan']['high_pddl'] if sg['discrete_action']['action'] in subgoals_to_evaluate]
-                for eval_idx in subgoal_idxs:
+                subgoals_and_idxs = [(sg['discrete_action']['action'], sg['high_idx']) for sg in traj['plan']['high_pddl'] if sg['discrete_action']['action'] in subgoals_to_evaluate]
+                for subgoal, eval_idx in subgoals_and_idxs:
                     print("No. of trajectories left: %d" % (task_queue.qsize()))
-                    cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results)
+                    if filtered_traj_by_subgoal is not None:
+                        subgoal_filtered_traj_data = filtered_traj_by_subgoal[subgoal]
+                    else:
+                        subgoal_filtered_traj_data = None
+                    cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -56,7 +67,7 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results):
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
         # reset model
         model.reset()
 
@@ -74,8 +85,13 @@ class EvalSubgoals(Eval):
         # print subgoal info
         print("Evaluating: %s\nSubgoal %s (%d)\nInstr: %s" % (traj_data['root'], subgoal_action, eval_idx, subgoal_instr))
 
+        if subgoal_filtered_traj_data is not None:
+            to_input = subgoal_filtered_traj_data
+        else:
+            to_input = traj_data
+
         # extract language features
-        feat = model.featurize([traj_data], load_mask=False)
+        feat = model.featurize([to_input], load_mask=False)
 
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None
@@ -188,7 +204,9 @@ class EvalSubgoals(Eval):
                      'subgoal_success_spl': float(s_spl),
                      'subgoal_path_weighted_success_spl': float(plw_s_spl),
                      'subgoal_path_len_weight': float(expert_pl),
-                     'reward': float(reward)}
+                     'reward': float(reward),
+                     'num_steps': t,
+                     }
         if subgoal_success:
             sg_successes = successes[subgoal_action]
             sg_successes.append(log_entry)
@@ -203,6 +221,8 @@ class EvalSubgoals(Eval):
         subgoals_to_evaluate = list(successes.keys())
         subgoals_to_evaluate.sort()
         for sg in subgoals_to_evaluate:
+            successes_num_steps = sum([entry['num_steps'] for entry in successes[sg]])
+            failures_num_steps = sum([entry['num_steps'] for entry in failures[sg]])
             num_successes, num_failures = len(successes[sg]), len(failures[sg])
             num_evals = len(successes[sg]) + len(failures[sg])
             if num_evals > 0:
@@ -222,6 +242,9 @@ class EvalSubgoals(Eval):
                 print("%s ==========" % sg)
                 print("SR: %d/%d = %.3f" % (num_successes, num_evals, sr))
                 print("PLW S: %.3f" % (sr_plw))
+                print("avg steps (successes): %.3f" % (0 if not successes[sg] else successes_num_steps / float(num_successes)))
+                print("avg steps (failures): %.3f" % (0 if not failures[sg] else failures_num_steps / float(num_failures)))
+                print("avg steps (overall): %.3f" % ((successes_num_steps + failures_num_steps) / float(num_evals)))
         print("------------")
 
         lock.release()
