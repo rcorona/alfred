@@ -20,11 +20,11 @@ if __name__ == '__main__':
     # settings
     parser.add_argument('--seed', help='random seed', default=123, type=int)
     parser.add_argument('--data', help='dataset folder', default='data/json_feat_2.1.0')
-    parser.add_argument('--splits', help='json file containing train/dev/test splits', default='splits/oct21.json')
+    parser.add_argument('--splits', help='json file containing train/dev/test splits', default='data/splits/oct21.json')
     parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
     parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
-    parser.add_argument('--model', help='model to use', default='seq2seq_im')
+    parser.add_argument('--model', help='model to use', default='seq2seq_im_mask')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--resume', help='load a checkpoint')
@@ -90,7 +90,7 @@ if __name__ == '__main__':
         vocab = torch.load(os.path.join(args.data, "%s.vocab" % args.pp_folder))
 
     # load model
-    M = import_module('model.{}'.format(args.model))
+    M = import_module('models.model.{}'.format(args.model))
     if args.resume:
         print("Loading: " + args.resume)
         model, optimizer = M.Module.load(args.resume)

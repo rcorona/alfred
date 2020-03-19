@@ -66,7 +66,7 @@ class Module(Base):
         '''
         device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         feat = collections.defaultdict(list)
-
+        
         for ex in batch:
             ###########
             # auxillary
@@ -104,12 +104,12 @@ class Module(Base):
             # load Resnet features from disk
             if load_frames and not self.test_mode:
                 root = self.get_task_root(ex)
-                im = torch.load(os.path.join(root, self.feat_pt))
+                #im = torch.load(os.path.join(root, self.feat_pt))
                 keep = [None] * len(ex['plan']['low_actions'])
                 for i, d in enumerate(ex['images']):
                     # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
                     if keep[d['low_idx']] is None:
-                        keep[d['low_idx']] = im[i]
+                        keep[d['low_idx']] = torch.zeros((512,7,7), requires_grad=False) #im[i]
                 keep.append(keep[-1])  # stop frame
                 feat['frames'].append(torch.stack(keep, dim=0))
 
@@ -362,7 +362,8 @@ class Module(Base):
         for task in data:
             ex = self.load_task_json(task)
             i = ex['task_id']
-            label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
+            if i in preds:
+                label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
+                m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
+                m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}
