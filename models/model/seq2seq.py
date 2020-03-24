@@ -11,6 +11,7 @@ from tqdm import trange
 from torch.utils.data import Dataset, DataLoader
 import pdb
 from copy import deepcopy
+import pickle
 
 class Module(nn.Module):
 
@@ -48,7 +49,7 @@ class Module(nn.Module):
         # Used for counting dataset examples. 
         #self.subgoal_count = 0
         #self.trajectories_count = 0
-        self.subgoal_set = set()
+        #self.subgoal_set = set()
 
     def run_train(self, splits, args=None, optimizer=None):
         '''
@@ -83,10 +84,12 @@ class Module(nn.Module):
             valid_seen = valid_seen[:16]
             valid_unseen = valid_unseen[:16]
 
+        print('about to load data')
+
         # Pre-load json files into memory. 
-        train = self.load_dataset(train, args.subgoal, 'train')
-        valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen')
-        valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen')
+        train = self.load_dataset(train, args.subgoal, 'train', args.module_dataset)
+        valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.module_dataset)
+        valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.module_dataset)
 
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)
@@ -367,19 +370,32 @@ class Module(nn.Module):
         '''
         return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
-    def load_dataset(self, data, subgoal, dataset_type): 
+    def load_dataset(self, data, subgoal, dataset_type, data_path): 
 
-        # First read all json files. 
-        self.datasets[dataset_type] = []
+        # Where to save/load dataset. 
+        path = '{}_{}.pkl'.format(data_path, dataset_type)
 
-        # Add all examples extracted from trajectory as individual data points to dataset. 
-        for task in data:
-            self.datasets[dataset_type].extend(self.load_task_json(task, subgoal)) 
+        # Either load prepared dataset or craft it. 
+        if os.path.isfile(path): 
+            self.datasets[dataset_type] = pickle.load(open(path, 'rb'))
+        
+        else: 
+            # First read all json files. 
+            self.datasets[dataset_type] = []
 
-        print(self.subgoal_set)
-        exit()
+            # Add all examples extracted from trajectory as individual data points to dataset. 
+            i = 0
 
-        return self.datasets[dataset_type]
+            for task in data:
+                self.datasets[dataset_type].extend(self.load_task_json(task, subgoal)) 
+                i += 1
+
+                print('{}% loaded.'.format(float(i) / float(len(data))), end='\r')
+
+            # Save dataset. 
+            pickle.dump(self.datasets[dataset_type], open(path, 'wb'))
+
+            return self.datasets[dataset_type]
 
     def iterate(self, data, batch_size):
         '''
