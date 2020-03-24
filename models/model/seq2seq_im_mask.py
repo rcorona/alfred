@@ -65,7 +65,6 @@ class Module(Base):
         tensorize and pad batch input
         '''
         device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-        #device = torch.device('cpu')
         feat = collections.defaultdict(list)
 
         for ex in batch:
@@ -162,12 +161,15 @@ class Module(Base):
         '''
         append segmented instr language and low-level actions into single sequences
         '''
-        is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
-        if not is_serialized:
-            feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
-            if not self.test_mode:
-                feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-
+        
+        try: 
+            is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
+            if not is_serialized:
+                feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
+                if not self.test_mode:
+                    feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
+        except: 
+            pass#pdb.set_trace()
 
     def decompress_mask(self, compressed_mask):
         '''
@@ -360,8 +362,7 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for task in data:
-            ex = self.load_task_json(task)
+        for ex in data:
             i = ex['task_id']
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))

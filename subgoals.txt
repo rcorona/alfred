@@ -1,0 +1,1 @@
+{'CleanObject', 'SliceObject', 'GotoLocation', 'ToggleObject', 'CoolObject', 'PickupObject', 'PutObject', 'NoOp', 'HeatObject'}

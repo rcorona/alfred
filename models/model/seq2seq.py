@@ -10,6 +10,7 @@ from tensorboardX import SummaryWriter
 from tqdm import trange
 from torch.utils.data import Dataset, DataLoader
 import pdb
+from copy import deepcopy
 
 class Module(nn.Module):
 
@@ -40,6 +41,14 @@ class Module(nn.Module):
 
         # summary self.writer
         self.summary_writer = None
+    
+        # Will hold json datasets (train, val, etc.) in memory. 
+        self.datasets = {}
+
+        # Used for counting dataset examples. 
+        #self.subgoal_count = 0
+        #self.trajectories_count = 0
+        self.subgoal_set = set()
 
     def run_train(self, splits, args=None, optimizer=None):
         '''
@@ -62,11 +71,22 @@ class Module(nn.Module):
             valid_seen = valid_seen[:small_valid_size]
             valid_unseen = valid_unseen[:small_valid_size]
 
+        # Loop for counting data points in dataset. 
+        #for ex in train: self.load_task_json(ex, args.subgoal)
+        #print('N trajectories: {}, N examples: {}'.format(self.trajectories_count, self.subgoal_count))
+        #exit()
+        ##
+
         # debugging: use to check if training loop works without waiting for full epoch
         if self.args.fast_epoch:
             train = train[:16]
             valid_seen = valid_seen[:16]
             valid_unseen = valid_unseen[:16]
+
+        # Pre-load json files into memory. 
+        train = self.load_dataset(train, args.subgoal, 'train')
+        valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen')
+        valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen')
 
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)
@@ -90,7 +110,7 @@ class Module(nn.Module):
             p_train = {}
             total_train_loss = list()
             random.shuffle(train) # shuffle every epoch
-            for batch, feat in self.iterate(train, args.batch, args.subgoal):
+            for batch, feat in self.iterate(train, args.batch):
                 out = self.forward(feat)
                 preds = self.extract_preds(out, batch, feat)
                 p_train.update(preds)
@@ -211,7 +231,7 @@ class Module(nn.Module):
         self.eval()
         total_loss = list()
         dev_iter = iter
-        for batch, feat in self.iterate(dev, args.batch, args.subgoal):
+        for batch, feat in self.iterate(dev, args.batch):
             out = self.forward(feat)
             preds = self.extract_preds(out, batch, feat)
             p_dev.update(preds)
@@ -250,8 +270,7 @@ class Module(nn.Module):
         readable output generator for debugging
         '''
         debug = {}
-        for task in data:
-            ex = self.load_task_json(task)
+        for ex in data:
             i = ex['task_id']
             debug[i] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
@@ -268,14 +287,18 @@ class Module(nn.Module):
         with open(json_path) as f:
             data = json.load(f)
 
-        if subgoal is not None: 
-            data = self.filter_subgoal(data, subgoal)
+        if subgoal is not None:
+            
+            # Will return list of subgoal datapoints. 
+            return self.filter_subgoal(data, subgoal)
 
-        return data
+        # Otherwise return list with singleton item. 
+        return [data]
 
     def filter_subgoal(self, data, subgoal_name): 
         '''
         Filter a loaded json to only include examples from a specific type of subgoal. 
+        Returns a list of individual examples for subgoal type followed by the NoOp action. 
         '''
         # First get idx of segments where specified subgoal takes place. 
         valid_idx = set()
@@ -284,41 +307,59 @@ class Module(nn.Module):
             
             curr_subgoal = subgoal['discrete_action']['action']
 
-            if curr_subgoal == subgoal_name or curr_subgoal == 'NoOp': 
+            # Keep the subgoal we're looking for. 
+            if curr_subgoal == subgoal_name: 
                 valid_idx.add(subgoal['high_idx'])
 
+            # As well as the final NoOp operation, we will copy this to the end of every subgoal example. 
+            elif curr_subgoal == 'NoOp':
+                noop_idx = subgoal['high_idx']
+
+        # No examples will be added from this file to dataset. 
         if len(valid_idx) == 0: 
-            return None
+            return []
 
-        # Filter language instructions. 
-        try: 
-            data['num']['lang_instr'] = [data['num']['lang_instr'][idx] for idx in (valid_idx - set([max(valid_idx)]))]
-        except: 
-            pdb.set_trace()
-            exit()
+        # Use for counting dataset examples.  
+        #self.subgoal_count += len(valid_idx) - 1
+        #self.trajectories_count += 1
+        #for subgoal in data['plan']['high_pddl']: self.subgoal_set.add(subgoal['discrete_action']['action'])
+        #return 
 
-        # Filter low level actions. 
-        data['plan']['low_actions'] = [a for a in data['plan']['low_actions'] if a['high_idx'] in valid_idx]
+        # Create an example from each instance of the subgoal.
+        examples = []
 
-        # Filter images. 
-        data['images'] = [img for img in data['images'] if img['high_idx'] in valid_idx]
-        
-        # Fix image idx. 
-        low_idxs = sorted(list(set([img['low_idx'] for img in data['images']])))
-        
-        for img in data['images']: 
-            img['low_idx'] = low_idxs.index(img['low_idx'])
+        for idx in valid_idx: 
 
-        # Filter action-low.
-        for i in range(len(data['num']['action_low'])): 
-            data['num']['action_low'][i] = [a for a in data['num']['action_low'][i] if a['high_idx'] in valid_idx]
+            # Need NoOp after every subgoal. 
+            idxs = (idx, noop_idx)
 
-        data['num']['action_low'] = [a for a in data['num']['action_low'] if len(a) > 0]
+            # Copy data to make individual example. 
+            data_cp = deepcopy(data)
 
-        #pdb.set_trace()
-        #exit()
+            # Filter language instructions. 
+            data_cp['num']['lang_instr'] = [data_cp['num']['lang_instr'][idx]]
 
-        return data
+            # Filter low level actions. 
+            data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] in idxs]
+
+            # Filter images. 
+            data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] in idxs]
+            
+            # Fix image idx. 
+            low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
+            
+            for img in data_cp['images']: 
+                img['low_idx'] = low_idxs.index(img['low_idx'])
+
+            # Filter action-low.
+            for i in range(len(data_cp['num']['action_low'])): 
+                data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] in idxs]
+
+            data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
+
+            examples.append(data_cp)
+
+        return examples
 
     def get_task_root(self, ex):
         '''
@@ -326,18 +367,26 @@ class Module(nn.Module):
         '''
         return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
-    def iterate(self, data, batch_size, subgoal=None):
+    def load_dataset(self, data, subgoal, dataset_type): 
+
+        # First read all json files. 
+        self.datasets[dataset_type] = []
+
+        # Add all examples extracted from trajectory as individual data points to dataset. 
+        for task in data:
+            self.datasets[dataset_type].extend(self.load_task_json(task, subgoal)) 
+
+        print(self.subgoal_set)
+        exit()
+
+        return self.datasets[dataset_type]
+
+    def iterate(self, data, batch_size):
         '''
-        breaks dataset into batch_size chunks for training
+         breaks dataset into batch_size chunks for training
         '''
         for i in trange(0, len(data), batch_size, desc='batch'):
-            tasks = data[i:i+batch_size]
-            batch = [self.load_task_json(task, subgoal) for task in tasks]
-            batch = [b for b in batch if b is not None]
-
-            if len(batch) == 0: 
-                raise
-
+            batch = data[i:i+batch_size]
             feat = self.featurize(batch)
             yield batch, feat
 
