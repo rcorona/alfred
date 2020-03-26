@@ -67,7 +67,7 @@ class Module(Base):
         device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         #device = torch.device('cpu')
         feat = collections.defaultdict(list)
-        
+
         for ex in batch:
             ###########
             # auxillary
@@ -363,15 +363,8 @@ class Module(Base):
         for task in data:
             ex = self.load_task_json(task)
             i = ex['task_id']
-<<<<<<< HEAD
-            label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
-        return {k: sum(v)/len(v) for k, v in m.items()}
-=======
             if i in preds:
                 label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
                 m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
                 m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}
->>>>>>> 8362f79a35d5847d517f029f771de4c42df41f83
