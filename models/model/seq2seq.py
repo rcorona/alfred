@@ -110,12 +110,15 @@ class Module(nn.Module):
                 sum_loss = sum_loss.detach().cpu()
                 total_train_loss.append(float(sum_loss))
                 train_iter += self.args.batch
+                if train_iter > 2000:
+                    break
 
             
             print('\ntrain metrics\n')
             # compute metrics for train
             m_train = {k: sum(v) / len(v) for k, v in m_train.items()}
-            m_train.update(self.compute_metric(p_train, train))
+            #import pdb;pdb.set_trace()
+            #m_train.update(self.compute_metric(p_train, train))
             m_train['total_loss'] = sum(total_train_loss) / len(total_train_loss)
             self.summary_writer.add_scalar('train/total_loss', m_train['total_loss'], train_iter)
 
@@ -189,10 +192,10 @@ class Module(nn.Module):
                 'vocab': self.vocab,
             }, fsave)
 
-            # debug action output josn
-            fpred = os.path.join(args.dout, 'train.debug.preds.json')
-            with open(fpred, 'wt') as f:
-                json.dump(self.make_debug(p_train, train), f, indent=2)
+#             # debug action output josn
+#             fpred = os.path.join(args.dout, 'train.debug.preds.json')
+#             with open(fpred, 'wt') as f:
+#                 json.dump(self.make_debug(p_train, train), f, indent=2)
 
             # write stats
             for split in stats.keys():
