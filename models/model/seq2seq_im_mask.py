@@ -110,7 +110,7 @@ class Module(Base):
                     # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
                     if keep[d['low_idx']] is None:
                         keep[d['low_idx']] = im[i]
-                keep.append(keep[-1])  # stop frame
+                if not self.args.subgoal: keep.append(keep[-1])  # stop frame
                 feat['frames'].append(torch.stack(keep, dim=0))
 
 
@@ -303,7 +303,12 @@ class Module(Base):
 
         # action loss
         pad_valid = (l_alow != self.pad)
-        alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        
+        try: 
+            alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        except: 
+            pdb.set_trace()
+
         alow_loss *= pad_valid.float()
         alow_loss = alow_loss.mean()
         losses['action_low'] = alow_loss * self.args.action_loss_wt
@@ -312,8 +317,10 @@ class Module(Base):
         valid_idxs = valid.view(-1).nonzero().view(-1)
         flat_p_alow_mask = p_alow_mask.view(p_alow_mask.shape[0]*p_alow_mask.shape[1], *p_alow_mask.shape[2:])[valid_idxs]
         flat_alow_mask = torch.cat(feat['action_low_mask'], dim=0)
-        alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
-        losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
+            
+        if len(flat_alow_mask) > 0: 
+            alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
+            losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
 
         # subgoal completion loss
         if self.args.subgoal_aux_loss_wt > 0:
@@ -340,12 +347,14 @@ class Module(Base):
         '''
         mask loss that accounts for weight-imbalance between 0 and 1 pixels
         '''
-        bce = self.bce_with_logits(pred_masks, gt_masks)
+        try:
+            bce = self.bce_with_logits(pred_masks, gt_masks)
+        except: 
+            pdb.set_trace()
+        
         flipped_mask = self.flip_tensor(gt_masks)
         inside = (bce * gt_masks).sum() / (gt_masks).sum()
         outside = (bce * flipped_mask).sum() / (flipped_mask).sum()
-        
-        pdb.set_trace()
         
         return inside + outside
 

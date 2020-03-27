@@ -344,10 +344,10 @@ class Module(nn.Module):
             data_cp['num']['lang_instr'] = [data_cp['num']['lang_instr'][idx]]
 
             # Filter low level actions. 
-            data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] in idxs]
+            data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == idx]
 
             # Filter images. 
-            data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] in idxs]
+            data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == idx]
             
             # Fix image idx. 
             low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
@@ -357,7 +357,7 @@ class Module(nn.Module):
 
             # Filter action-low.
             for i in range(len(data_cp['num']['action_low'])): 
-                data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] in idxs]
+                data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
 
             data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
 

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-
+import pdb
 
 class SelfAttn(nn.Module):
     '''
@@ -166,7 +166,12 @@ class ConvFrameMaskDecoder(nn.Module):
         masks = []
         attn_scores = []
         for t in range(max_t):
-            action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+            try: 
+                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+            except: 
+                #pdb.set_trace()
+                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, -1], e_t, state_t)
+
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)
