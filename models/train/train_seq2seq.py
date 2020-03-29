@@ -5,7 +5,7 @@ sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+#os.environ["CUDA_VISIBLE_DEVICES"]="2"
 
 import os
 import torch
@@ -32,7 +32,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--resume', help='load a checkpoint')
-    parser.add_argument('--module_dataset', help='Path to submodule specific dataset.')
+    parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
 
     # hyper parameters
     parser.add_argument('--batch', help='batch size', default=8, type=int)

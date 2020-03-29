@@ -78,16 +78,17 @@ class Module(nn.Module):
         #exit()
         ##
 
-        # Pre-load json files into memory. 
-        train = self.load_dataset(train, args.subgoal, 'train', args.module_dataset)
-        valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.module_dataset)
-        valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.module_dataset)
-
         # debugging: use to check if training loop works without waiting for full epoch
         if self.args.fast_epoch:
-            train = train[:16]
-            valid_seen = valid_seen[:16]
-            valid_unseen = valid_unseen[:16]
+            train = train[:50]
+            valid_seen = valid_seen[:50]
+            valid_unseen = valid_unseen[:50]
+
+        # Pre-load json files into memory.
+        if args.preloaded_dataset: 
+            train = self.load_dataset(train, args.subgoal, 'train', args.preloaded_dataset)
+            valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.preloaded_dataset)
+            valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.preloaded_dataset)
 
         print('about to load data')
 
@@ -235,19 +236,22 @@ class Module(nn.Module):
         total_loss = list()
         dev_iter = iter
         for batch, feat in self.iterate(dev, args.batch):
-            out = self.forward(feat)
-            preds = self.extract_preds(out, batch, feat)
-            p_dev.update(preds)
-            #pdb.set_trace()
-            loss = self.compute_loss(out, batch, feat)
-            for k, v in loss.items():
-                ln = 'loss_' + k
-                m_dev[ln].append(v.item())
-                self.summary_writer.add_scalar("%s/%s" % (name, ln), v.item(), dev_iter)
-            sum_loss = sum(loss.values())
-            self.summary_writer.add_scalar("%s/loss" % (name), sum_loss, dev_iter)
-            total_loss.append(float(sum_loss.detach().cpu()))
-            dev_iter += len(batch)
+            try: 
+                out = self.forward(feat)
+                preds = self.extract_preds(out, batch, feat)
+                p_dev.update(preds)
+                #pdb.set_trace()
+                loss = self.compute_loss(out, batch, feat)
+                for k, v in loss.items():
+                    ln = 'loss_' + k
+                    m_dev[ln].append(v.item())
+                    self.summary_writer.add_scalar("%s/%s" % (name, ln), v.item(), dev_iter)
+                sum_loss = sum(loss.values())
+                self.summary_writer.add_scalar("%s/loss" % (name), sum_loss, dev_iter)
+                total_loss.append(float(sum_loss.detach().cpu()))
+                dev_iter += len(batch)
+            except: 
+                continue
 
         m_dev = {k: sum(v) / len(v) for k, v in m_dev.items()}
         total_loss = sum(total_loss) / len(total_loss)
@@ -274,6 +278,7 @@ class Module(nn.Module):
         '''
         debug = {}
         for ex in data:
+            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             i = ex['task_id']
             debug[i] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
@@ -306,7 +311,6 @@ class Module(nn.Module):
         # First get idx of segments where specified subgoal takes place. 
         valid_idx = set()
        
-
         for subgoal in data['plan']['high_pddl']:
             
             curr_subgoal = subgoal['discrete_action']['action']
@@ -334,9 +338,6 @@ class Module(nn.Module):
 
         for idx in valid_idx: 
 
-            # Need NoOp after every subgoal. 
-            idxs = (idx, noop_idx)
-
             # Copy data to make individual example. 
             data_cp = deepcopy(data)
 
@@ -361,6 +362,14 @@ class Module(nn.Module):
 
             data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
 
+            # Extend low-level actions with stop action. 
+            if not len(data_cp['num']['action_low']) == 1:
+                continue
+            
+            assert(len(data_cp['num']['action_low']) == 1)
+            
+            data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
+            
             examples.append(data_cp)
 
         return examples
@@ -403,7 +412,13 @@ class Module(nn.Module):
          breaks dataset into batch_size chunks for training
         '''
         for i in trange(0, len(data), batch_size, desc='batch'):
+            
             batch = data[i:i+batch_size]
+
+            # Load json files if needed. 
+            if 'repeat_idx' in batch[0]: 
+                batch = [self.load_task_json(task, None)[0] for task in batch]
+
             feat = self.featurize(batch)
             yield batch, feat
 

@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
+from model.seq2seq_im_mask import Module as Seq2SeqIM
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -15,31 +16,28 @@ class Module(Base):
 
     def __init__(self, args, vocab):
         '''
-        Seq2Seq agent
+        Modular Seq2Seq agent
         '''
         super().__init__(args, vocab)
-
-        # encoder and self-attention
-        self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
-        self.enc_att = vnn.SelfAttn(args.dhid*2)
 
         # subgoal monitoring
         self.subgoal_monitoring = (self.args.pm_aux_loss_wt > 0 or self.args.subgoal_aux_loss_wt > 0)
 
-        # frame mask decoder
-        decoder = vnn.ConvFrameMaskDecoderProgressMonitor if self.subgoal_monitoring else vnn.ConvFrameMaskDecoder
-        self.dec = decoder(self.emb_action_low, args.dframe, 2*args.dhid,
-                           pframe=args.pframe,
-                           attn_dropout=args.attn_dropout,
-                           hstate_dropout=args.hstate_dropout,
-                           actor_dropout=args.actor_dropout,
-                           input_dropout=args.input_dropout,
-                           teacher_forcing=args.dec_teacher_forcing)
+        # Individual network for each of the 8 submodules. 
+        self.submodules = nn.ModuleList([Seq2SeqIM(args, vocab) for i in range(8)])
 
-        # dropouts
-        self.vis_dropout = nn.Dropout(args.vis_dropout)
-        self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
-        self.input_dropout = nn.Dropout(args.input_dropout)
+        # Dictionary from submodule names to idx. 
+        self.submodule_names = [
+            'GotoLocation', 
+            'PickupObject', 
+            'PutObject', 
+            'CoolObject', 
+            'HeatObject', 
+            'CleanObject', 
+            'SliceObject', 
+            'ToggleObject',
+            'NoOp'
+        ]
 
         # internal states
         self.state_t = None
@@ -87,19 +85,15 @@ class Module(Base):
             # inputs
             #########
 
-            # serialize segments
-            self.serialize_lang_action(ex)
-
             # goal and instr language
             lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
 
             # zero inputs if specified
             lang_goal = self.zero_input(lang_goal) if self.args.zero_goal else lang_goal
-            lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
+            #lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
 
             # append goal + instr
-            lang_goal_instr = lang_goal + lang_instr
-            feat['lang_goal_instr'].append(lang_goal_instr)
+            feat['lang_goal_instr'].append([lang_goal + instr for instr in lang_instr])
 
             # load Resnet features from disk
             if load_frames and not self.test_mode:
@@ -110,9 +104,16 @@ class Module(Base):
                     # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
                     if keep[d['low_idx']] is None:
                         keep[d['low_idx']] = im[i]
-                keep.append(keep[-1])  # stop frame
+                if not self.args.subgoal: keep.append(keep[-1])  # stop frame
                 feat['frames'].append(torch.stack(keep, dim=0))
 
+            # Ground trutch high-idx for modular model. 
+            feat['module_idx'] = [self.submodule_names.index(a['discrete_action']['action']) for a in ex['plan']['high_pddl']]
+            
+            feat['a_module_idx'] = []
+            for seq in ex['num']['action_low']: 
+                for a in seq: 
+                    feat['a_module_idx'].append(feat['module_idx'][a['high_idx']])
 
             #########
             # outputs
@@ -120,20 +121,34 @@ class Module(Base):
 
             if not self.test_mode:
                 # low-level action
-                feat['action_low'].append([a['action'] for a in ex['num']['action_low']])
+                action_low = []
+                for seq in ex['num']['action_low']: 
+                    action_low.append([a['action'] for a in seq])
+
+                feat['action_low'].append(action_low)
 
                 # low-level action mask
                 if load_mask:
-                    feat['action_low_mask'].append([self.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None])
+                    masks = []
+                    for seq in ex['num']['action_low']: 
+                        masks.append([self.decompress_mask(a['mask']) for a in seq if a['mask'] is not None])
+
+                    feat['action_low_mask'].append(masks)
 
                 # low-level valid interact
-                feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
+                valid_interact = []
+                for seq in ex['num']['action_low']: 
+                    valid_interact.append([a['valid_interact'] for a in seq])
 
+                feat['action_low_valid_interact'].append(valid_interact)
+               
         # tensorization and padding
         for k, v in feat.items():
             if k in {'lang_goal_instr'}:
                 # language embedding and padding
+                pdb.set_trace()
                 seqs = [torch.tensor(vv, device=device) for vv in v]
+                pdb.set_trace()
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
                 seq_lengths = np.array(list(map(len, v)))
                 embed_seq = self.emb_word(pad_seq)
@@ -154,6 +169,9 @@ class Module(Base):
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
                 feat[k] = pad_seq
 
+                if k == 'action_low':
+                    pdb.set_trace()
+
         return feat
 
 
@@ -165,7 +183,6 @@ class Module(Base):
         try: 
             is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
             if not is_serialized:
-                feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
                 if not self.test_mode:
                     feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
         except: 
@@ -183,9 +200,9 @@ class Module(Base):
     def forward(self, feat, max_decode=300):
         #pdb.set_trace()
         cont_lang, enc_lang = self.encode_lang(feat)
-        state_0 = cont_lang, torch.zeros_like(cont_lang)
+        state_0 = cont_lang[0], torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
+        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, module_idx=feat['module_idx'])
         feat.update(res)
         return feat
 
@@ -195,14 +212,25 @@ class Module(Base):
         encode goal+instr language
         '''
         emb_lang_goal_instr = feat['lang_goal_instr']
-        self.lang_dropout(emb_lang_goal_instr.data)
-        enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
-        enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
-        self.lang_dropout(enc_lang_goal_instr)
-        cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+        
+        # Dynamically use modules. 
+        cont_lang_goal_instrs = []
+        enc_lang_goal_instrs = []
 
-        return cont_lang_goal_instr, enc_lang_goal_instr
+        for i in range(len(emb_lang_goal_instr)):
+    
+            module = self.submodules[feat['module_idx'][i]]
 
+            module.lang_dropout(emb_lang_goal_instr[i].data)
+            enc_lang_goal_instr, _ = module.enc(emb_lang_goal_instr[i])
+            enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
+            module.lang_dropout(enc_lang_goal_instr)
+            cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+
+            cont_lang_goal_instrs.append(cont_lang_goal_instr)
+            enc_lang_goal_instrs.append(enc_lang_goal_instr)
+
+        return cont_lang_goal_instrs, enc_lang_goal_instrs
 
     def reset(self):
         '''
@@ -304,7 +332,10 @@ class Module(Base):
         # action loss
         pad_valid = (l_alow != self.pad)
         
-        alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        try: 
+            alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        except: 
+            pdb.set_trace()
 
         alow_loss *= pad_valid.float()
         alow_loss = alow_loss.mean()
@@ -372,7 +403,7 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
+            if 'repeat_idx'in ex: ex = self.load_task_json(ex, None)[0]
             i = ex['task_id']
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
