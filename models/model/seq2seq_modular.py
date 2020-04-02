@@ -146,7 +146,6 @@ class Module(Base):
         for k, v in feat.items():
             if k in {'lang_goal_instr'}:
                 # language embedding and padding
-                pdb.set_trace()
                 seqs = [torch.tensor(vv, device=device) for vv in v]
                 pdb.set_trace()
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
