@@ -72,25 +72,17 @@ class Module(nn.Module):
             valid_seen = valid_seen[:small_valid_size]
             valid_unseen = valid_unseen[:small_valid_size]
 
-        # Loop for counting data points in dataset. 
-        #for ex in train: self.load_task_json(ex, args.subgoal)
-        #print('N trajectories: {}, N examples: {}'.format(self.trajectories_count, self.subgoal_count))
-        #exit()
-        ##
-
         # debugging: use to check if training loop works without waiting for full epoch
         if self.args.fast_epoch:
-            train = train[:50]
-            valid_seen = valid_seen[:50]
-            valid_unseen = valid_unseen[:50]
+            train = train[:16]
+            valid_seen = valid_seen[:16]
+            valid_unseen = valid_unseen[:16]
 
         # Pre-load json files into memory.
         if args.preloaded_dataset: 
             train = self.load_dataset(train, args.subgoal, 'train', args.preloaded_dataset)
             valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.preloaded_dataset)
             valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.preloaded_dataset)
-
-        print('about to load data')
 
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)

@@ -65,6 +65,9 @@ def collect_subgoal_stats(example):
         # Count action types per subgoal. 
         action_types = {a_type: 0 for a_type in ACTION_SPACE}
 
+        if subgoals[i] == 'HeatObject': 
+            pdb.set_trace()
+
         for action in actions[i]: 
             action_types[ACTION2TYPE[action['discrete_action']['action']]] += 1
 
@@ -160,7 +163,7 @@ def plot_subgoal_stats(stats):
 if __name__ == '__main__':
 
     # Load statistics if they exist. 
-    if os.path.isfile('stats.pkl'): 
+    if False:#os.path.isfile('stats.pkl'): 
         stats = pickle.load(open('stats.pkl', 'rb'))
 
     # Otherwise collect them. 

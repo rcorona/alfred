@@ -3,8 +3,9 @@ import sys
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
+sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'data'))
 
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+#os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 #os.environ["CUDA_VISIBLE_DEVICES"]="2"
 
 import os

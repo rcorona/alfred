@@ -172,8 +172,7 @@ class Module(Base):
                     pdb.set_trace()
 
         return feat
-
-
+    
     def serialize_lang_action(self, feat):
         '''
         append segmented instr language and low-level actions into single sequences

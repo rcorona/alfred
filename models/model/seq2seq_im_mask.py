@@ -160,8 +160,7 @@ class Module(Base):
     def serialize_lang_action(self, feat):
         '''
         append segmented instr language and low-level actions into single sequences
-        '''
-        
+        ''' 
         try: 
             is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
             if not is_serialized:

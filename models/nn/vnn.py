@@ -290,3 +290,86 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
             'state_t': state_t
         }
         return results
+
+class ConvFrameDecoder(nn.Module):
+    '''
+    action decoder
+    '''
+
+    def __init__(self, emb, dframe, dhid, pframe=300,
+                 attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
+                 teacher_forcing=False):
+        super().__init__()
+        demb = emb.weight.size(1)
+
+        self.emb = emb
+        self.pframe = pframe
+        self.dhid = dhid
+        self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
+        self.cell = nn.LSTMCell(dhid+dframe+demb, dhid)
+        self.attn = DotAttn()
+        self.input_dropout = nn.Dropout(input_dropout)
+        self.attn_dropout = nn.Dropout(attn_dropout)
+        self.hstate_dropout = nn.Dropout(hstate_dropout)
+        self.actor_dropout = nn.Dropout(actor_dropout)
+        self.go = nn.Parameter(torch.Tensor(demb))
+        self.actor = nn.Linear(dhid+dhid+dframe+demb, demb)
+        self.teacher_forcing = teacher_forcing
+        self.h_tm1_fc = nn.Linear(dhid, dhid)
+
+        nn.init.uniform_(self.go, -0.1, 0.1)
+
+    def step(self, enc, frame, e_t, state_tm1):
+        
+        # previous decoder hidden state
+        h_tm1 = state_tm1[0]
+
+        # encode vision and lang feat
+        vis_feat_t = self.vis_encoder(frame)
+        lang_feat_t = enc # language is encoded once at the start
+
+        # attend over language
+        weighted_lang_t, lang_attn_t = self.attn(self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1))
+
+        # concat visual feats, weight lang, and previous action embedding
+        inp_t = torch.cat([vis_feat_t, weighted_lang_t, e_t], dim=1)
+        inp_t = self.input_dropout(inp_t)
+
+        # update hidden state
+        state_t = self.cell(inp_t, state_tm1)
+        state_t = [self.hstate_dropout(x) for x in state_t]
+        h_t = state_t[0]
+
+        # decode action and mask
+        cont_t = torch.cat([h_t, inp_t], dim=1)
+        action_emb_t = self.actor(self.actor_dropout(cont_t))
+        action_t = action_emb_t.mm(self.emb.weight.t())
+
+        return action_t, state_t, lang_attn_t
+
+    def forward(self, enc, frames, gold=None, max_decode=25, state_0=None):
+        max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
+        batch = enc.size(0)
+        e_t = self.go.repeat(batch, 1)
+        state_t = state_0
+
+        actions = []
+        attn_scores = []
+        for t in range(max_t):
+            action_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+
+            actions.append(action_t)
+            attn_scores.append(attn_score_t)
+            if self.teacher_forcing and self.training:
+                w_t = gold[:, t]
+            else:
+                w_t = action_t.max(1)[1]
+            e_t = self.emb(w_t)
+
+        results = {
+            'out_action_high': torch.stack(actions, dim=1),
+            'out_attn_scores': torch.stack(attn_scores, dim=1),
+            'state_t': state_t
+        }
+
+        return results
