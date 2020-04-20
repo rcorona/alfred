@@ -418,7 +418,8 @@ def main(args):
             scene_to_type[str(s)] = st
 
     # pre-populate counts in this structure using saved trajectories path.
-    succ_traj, full_traj = load_successes_from_disk(args.save_path, succ_traj, args.just_examine, args.repeats_per_cond)
+    #succ_traj, full_traj = load_successes_from_disk(args.save_path, succ_traj, args.just_examine, args.repeats_per_cond)
+    succ_traj, full_traj = load_successes_from_disk(args.save_path, succ_traj, False, args.repeats_per_cond)
     if args.just_examine:
         print_successes(succ_traj)
         return
@@ -558,7 +559,8 @@ def main(args):
                     reward, terminal = agent.get_reward()
 
                 dump_data_dict()
-                save_video()
+                if not args.no_save_video:
+                    save_video()
 
             except Exception as e:
                 import traceback
@@ -715,6 +717,7 @@ if __name__ == "__main__":
     parser.add_argument("--in_parallel", action='store_true', help="this collection will run in parallel with others, so load from disk on every new sample")
     parser.add_argument("-n", "--num_threads", type=int, default=0, help="number of processes for parallel mode")
     parser.add_argument('--json_file', type=str, default="", help="path to json file with trajectory dump")
+    parser.add_argument('--no_save_video', action='store_true')
 
     # params
     parser.add_argument("--repeats_per_cond", type=int, default=3)

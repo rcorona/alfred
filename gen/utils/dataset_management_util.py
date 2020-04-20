@@ -15,7 +15,7 @@ def load_successes_from_disk(succ_dir, succ_traj, prune_trials, target_count,
                 for _, _dirs, _ in os.walk(os.path.join(succ_dir, d)):
                     for _d in _dirs:
                         for _, _, _files in os.walk(os.path.join(succ_dir, d, _d)):
-                            if 'video.mp4' in _files:
+                            if 'traj_data.json' in _files:
                                 k = (goal, pickup, movable, receptacle, scene_num)
                                 if k not in tuple_counts:
                                     tuple_counts[k] = 0
