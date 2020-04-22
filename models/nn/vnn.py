@@ -232,6 +232,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # previous decoder hidden state for modules. 
         h_tm1 = state_tm1[0]
 
+        batch_sz = frame.size(0)
+
         # encode vision and lang feat
         vis_feat_t = self.vis_encoder(frame)
         lang_feat_t = enc # language is encoded once at the start
@@ -280,7 +282,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
         c_t = module_attn.expand_as(c_t).mul(c_t).sum(1)
         inp_t = module_attn.expand_as(inp_t).mul(inp_t).sum(1)
-        lang_attn_t = module_attn.view(8,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+        lang_attn_t = module_attn.view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
 
         # decode action and mask
         cont_t = torch.cat([h_t_in, inp_t], dim=1)
@@ -295,7 +297,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_scores.view(8,1,8)
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_scores.view(batch_sz,1,8)
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
