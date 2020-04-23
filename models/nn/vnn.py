@@ -228,7 +228,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask):
+    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None):
         # previous decoder hidden state for modules. 
         h_tm1 = state_tm1[0]
 
