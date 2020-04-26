@@ -41,7 +41,7 @@ class EvalSubgoals(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(task)
+                traj = model.load_task_json(task)[0]
                 if args.modular_subgoals:
                     filtered_traj_by_subgoal = {
                         subgoal: model.load_task_json(task, subgoal)

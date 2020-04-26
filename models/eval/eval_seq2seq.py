@@ -9,6 +9,7 @@ import torch.multiprocessing as mp
 from eval_task import EvalTask
 from eval_subgoals import EvalSubgoals
 from eval_benchmark import EvalBenchmark
+from eval_hierarchical import EvalHierarchical
 
 
 if __name__ == '__main__':
@@ -37,6 +38,7 @@ if __name__ == '__main__':
 
     # eval settings
     parser.add_argument('--subgoals', type=str, help="subgoals to evaluate independently, eg:all or GotoLocation,PickupObject...", default="")
+    parser.add_argument('--eval_type', type=str, help="Which type of model to evaluate", choices=['subgoals', 'hierarchical'], default='')
     parser.add_argument('--smooth_nav', dest='smooth_nav', action='store_true', help='smooth nav actions (might be required based on training data)')
     parser.add_argument('--skip_model_unroll_with_expert', action='store_true', help='forward model with expert actions')
     parser.add_argument('--no_teacher_force_unroll_with_expert', action='store_true', help='no teacher forcing with expert')
@@ -57,8 +59,13 @@ if __name__ == '__main__':
         eval = EvalBenchmark(args, manager)
     else:
         # eval mode
-        if args.subgoals:
+        if args.eval_type == 'subgoals':
             eval = EvalSubgoals(args, manager)
+
+        elif args.eval_type == 'hierarchical': 
+
+            eval = EvalHierarchical(args, manager)
+
         else:
             eval = EvalTask(args, manager)
 

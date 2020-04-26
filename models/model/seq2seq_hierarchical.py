@@ -263,16 +263,18 @@ class Module(Base):
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
-            self.r_state['state_t'] = self.r_state['cont_lang'], torch.zeros_like(self.r_state['cont_lang'])
+            self.r_state['state_t'] = self.r_state['cont_lang'][0], torch.zeros_like(self.r_state['cont_lang'][0])
+            self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
 
         # previous action embedding
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
 
         # decode and save embedding and hidden states
-        out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'])
+        out_action_low, out_action_low_mask, state_t, controller_state_t, *_ = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'], controller_state_tm1=self.r_state['controller_state_t'])
 
         # save states
         self.r_state['state_t'] = state_t
+        self.r_state['controller_state_t'] = controller_state_t
         self.r_state['e_t'] = self.dec.emb(out_action_low.max(1)[1])
 
         # output formatting
