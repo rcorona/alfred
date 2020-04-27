@@ -348,8 +348,9 @@ class Module(Base):
         alow_loss = alow_loss.mean()
         losses['action_low'] = alow_loss * self.args.action_loss_wt
 
-        # Controller submodule attention loss. 
-        attn_loss = F.mse_loss(feat['out_module_attn_scores'].float(), feat['controller_attn_mask'].float(), reduction='none').sum(-1).view(-1)
+        # Controller submodule attention loss.
+        #attn_loss = F.mse_loss(feat['out_module_attn_scores'].float(), feat['controller_attn_mask'].float(), reduction='none').sum(-1).view(-1)
+        attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,8), feat['module_idxs'].view(-1).long(), reduction='none')
         attn_loss = (attn_loss * pad_valid.float()).mean()
         losses['controller_attn'] = attn_loss
 

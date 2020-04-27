@@ -21,6 +21,9 @@ class DotAttn(nn.Module):
     '''
     dot-attention (or soft-attention)
     '''
+    def __init__(self): 
+        super(DotAttn, self).__init__()
+        self.raw_score = None
 
     def forward(self, inp, h):
         score = self.softmax(inp, h)
@@ -28,6 +31,7 @@ class DotAttn(nn.Module):
 
     def softmax(self, inp, h):
         raw_score = inp.bmm(h.unsqueeze(2))
+        self.raw_score = raw_score
         score = F.softmax(raw_score, dim=1)
         return score
 
@@ -270,7 +274,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # Attend over submodules hidden states. 
         # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism. 
         _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
-       
+        module_attn_logits = self.controller_attn.raw_score
+
         # If no ground truth attention is provided, then used inferred values.  
         if controller_mask is None: 
             module_attn = module_scores
@@ -297,7 +302,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_scores.view(batch_sz,1,8)
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,8)
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
