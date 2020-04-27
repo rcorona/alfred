@@ -13,11 +13,32 @@ import pdb
 
 class Module(Base):
 
+    # Static variables. 
+    max_subgoals = 25
+    feat_pt = 'feat_conv.pt'
+
+    # List for submodule names. 
+    submodule_names = [
+        'GotoLocation', 
+        'PickupObject', 
+        'PutObject', 
+        'CoolObject', 
+        'HeatObject', 
+        'CleanObject', 
+        'SliceObject', 
+        'ToggleObject',
+        'NoOp'
+    ]
+
+
+
     def __init__(self, args, vocab):
         '''
         Seq2Seq agent
         '''
         super().__init__(args, vocab)
+
+        self.args = args
 
         # TODO remove hardcoding and base on list of module names or something. 
         n_modules = 8
@@ -49,144 +70,102 @@ class Module(Base):
         self.e_t = None
         self.test_mode = False
 
-        # Dictionary from submodule names to idx. 
-        self.submodule_names = [
-            'GotoLocation', 
-            'PickupObject', 
-            'PutObject', 
-            'CoolObject', 
-            'HeatObject', 
-            'CleanObject', 
-            'SliceObject', 
-            'ToggleObject',
-            'NoOp'
-        ]
-
         # bce reconstruction loss
         self.bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
         self.mse_loss = torch.nn.MSELoss(reduction='none')
 
         # paths
         self.root_path = os.getcwd()
-        self.feat_pt = 'feat_conv.pt'
-
-        # params
-        self.max_subgoals = 25
 
         # reset model
         self.reset()
 
-    def featurize(self, batch, load_mask=True, load_frames=True):
+    @classmethod
+    def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
         '''
         tensorize and pad batch input
         '''
-        device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-        feat = collections.defaultdict(list)
+        device = torch.device('cuda') if args.gpu else torch.device('cpu')
+        feat = {}
 
-        for ex in batch:
-            ###########
-            # auxillary
-            ###########
+        ###########
+        # auxillary
+        ###########
 
-            if not self.test_mode:
-                # subgoal completion supervision
-                if self.args.subgoal_aux_loss_wt > 0:
-                    feat['subgoals_completed'].append(np.array(ex['num']['low_to_high_idx']) / self.max_subgoals)
+        if not test_mode:
+            # subgoal completion supervision
+            if args.subgoal_aux_loss_wt > 0:
+                feat['subgoals_completed'] = np.array(ex['num']['low_to_high_idx']) / cls.max_subgoals
 
-                # progress monitor supervision
-                if self.args.pm_aux_loss_wt > 0:
-                    num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
-                    subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
-                    feat['subgoal_progress'].append(subgoal_progress)
+            # progress monitor supervision
+            if args.pm_aux_loss_wt > 0:
+                num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
+                subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
+                feat['subgoal_progress'] = subgoal_progress
 
-            #########
-            # inputs
-            #########
+        #########
+        # inputs
+        #########
 
-            # serialize segments
-            self.serialize_lang_action(ex)
+        # serialize segments
+        cls.serialize_lang_action(ex, test_mode)
 
-            # goal and instr language
-            lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+        # goal and instr language
+        lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
 
-            # zero inputs if specified
-            lang_goal = self.zero_input(lang_goal) if self.args.zero_goal else lang_goal
-            lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
+        # zero inputs if specified
+        lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
+        lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
-            # append goal + instr
-            lang_goal_instr = lang_goal + lang_instr
-            feat['lang_goal_instr'].append(lang_goal_instr)
+        # append goal + instr
+        lang_goal_instr = lang_goal + lang_instr
+        feat['lang_goal_instr'] = lang_goal_instr
 
-            # load Resnet features from disk
-            if load_frames and not self.test_mode:
-                root = self.get_task_root(ex)
-                im = torch.load(os.path.join(root, self.feat_pt))
-                keep = [None] * len(ex['plan']['low_actions'])
-                for i, d in enumerate(ex['images']):
-                    # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
-                    if keep[d['low_idx']] is None:
-                        keep[d['low_idx']] = im[i]
-                keep.append(keep[-1])  # stop frame
-                feat['frames'].append(torch.stack(keep, dim=0))
+        # load Resnet features from disk
+        if load_frames and not test_mode:
+            root = cls.get_task_root(ex, args)
+            im = torch.load(os.path.join(root, cls.feat_pt))
+            keep = [None] * len(ex['plan']['low_actions'])
+            for i, d in enumerate(ex['images']):
+                # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+                if keep[d['low_idx']] is None:
+                    keep[d['low_idx']] = im[i]
+            keep.append(keep[-1])  # stop frame
+            feat['frames'] = torch.stack(keep, dim=0)
 
-            #########
-            # outputs
-            #########
+        #########
+        # outputs
+        #########
 
-            if not self.test_mode:
-                
-                # Ground trutch high-idx for modular model.
-                high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
-                module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
-                module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for. 
-                module_idxs = [self.submodule_names.index(name) for name in module_names]
+        if not test_mode:
+            
+            # Ground trutch high-idx for modular model.
+            high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
+            module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
+            module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for. 
+            module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
-                feat['module_idxs'].append(module_idxs)
+            feat['module_idxs'] = module_idxs
 
-                # Attention masks for high level controller. 
-                attn_mask = np.zeros((len(module_idxs), 8))
-                attn_mask[np.arange(len(module_idxs)),module_idxs] = 1.0
-                feat['controller_attn_mask'].append(attn_mask)
+            # Attention masks for high level controller. 
+            attn_mask = np.zeros((len(module_idxs), 8))
+            attn_mask[np.arange(len(module_idxs)),module_idxs] = 1.0
+            feat['controller_attn_mask'] = attn_mask
 
-                # low-level action
-                feat['action_low'].append([a['action'] for a in ex['num']['action_low']])
+            # low-level action
+            feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
 
-                # low-level action mask
-                if load_mask:
-                    feat['action_low_mask'].append([self.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None])
+            # low-level action mask
+            if load_mask:
+                feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
 
-                # low-level valid interact
-                feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
-
-        # tensorization and padding
-        for k, v in feat.items():
-            if k in {'lang_goal_instr'}:
-                # language embedding and padding
-                seqs = [torch.tensor(vv, device=device) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                seq_lengths = np.array(list(map(len, v)))
-                embed_seq = self.emb_word(pad_seq)
-                packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                feat[k] = packed_input
-            elif k in {'action_low_mask'}:
-                # mask padding
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
-                feat[k] = seqs
-            elif k in {'subgoal_progress', 'subgoals_completed'}:
-                # auxillary padding
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                feat[k] = pad_seq
-            else:
-                # default: tensorize and pad sequence
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                feat[k] = pad_seq
-
+            # low-level valid interact
+            feat['action_low_valid_interact'] = [a['valid_interact'] for a in ex['num']['action_low']]
+        
         return feat
 
-
-    def serialize_lang_action(self, feat):
+    @classmethod
+    def serialize_lang_action(cls, feat, test_mode):
         '''
         append segmented instr language and low-level actions into single sequences
         ''' 
@@ -194,12 +173,13 @@ class Module(Base):
             is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
             if not is_serialized:
                 feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
-                if not self.test_mode:
+                if not test_mode:
                     feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
         except: 
             pass#pdb.set_trace()
 
-    def decompress_mask(self, compressed_mask):
+    @classmethod
+    def decompress_mask(cls, compressed_mask):
         '''
         decompress mask from json files
         '''
@@ -207,8 +187,24 @@ class Module(Base):
         mask = np.expand_dims(mask, axis=0)
         return mask
 
-
     def forward(self, feat, max_decode=300):
+        
+        # Finish vectorizing language. 
+        pad_seq, seq_lengths = feat['lang_goal_instr']
+        
+        if self.args.gpu: 
+            pad_seq = pad_seq.cuda()
+        
+        embed_seq = self.emb_word(pad_seq)
+        packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+        feat['lang_goal_instr'] = packed_input
+
+        # Move everything onto gpu if needed.
+        if self.args.gpu: 
+            for k in feat:
+                if hasattr(feat[k], 'cuda'):
+                    feat[k] = feat[k].cuda()
+
         cont_lang, enc_lang = self.encode_lang(feat)
 
         # Each module will have its own cell, but all will share a hidden state. TODO should we only have one cell state too? 
@@ -281,7 +277,6 @@ class Module(Base):
         feat['out_action_low'] = out_action_low.unsqueeze(0)
         feat['out_action_low_mask'] = out_action_low_mask.unsqueeze(0)
         return feat
-
 
     def extract_preds(self, out, batch, feat, clean_special_tokens=True):
         '''
@@ -388,10 +383,10 @@ class Module(Base):
         '''
         mask loss that accounts for weight-imbalance between 0 and 1 pixels
         '''
-        try:
-            bce = self.bce_with_logits(pred_masks, gt_masks)
-        except: 
-            pdb.set_trace()
+        pred_masks = pred_masks.cuda()
+        gt_masks = gt_masks.cuda()
+        
+        bce = self.bce_with_logits(pred_masks, gt_masks)
         
         flipped_mask = self.flip_tensor(gt_masks)
         inside = (bce * gt_masks).sum() / (gt_masks).sum()

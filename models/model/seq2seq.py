@@ -7,23 +7,90 @@ import collections
 import numpy as np
 from torch import nn
 from tensorboardX import SummaryWriter
+import tqdm
 from tqdm import trange
 from torch.utils.data import Dataset, DataLoader
 import pdb
 from copy import deepcopy
 import pickle
+import time
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
+
+class AlfredDataset(Dataset): 
+
+    def __init__(self, args, data, model_class, test_mode): 
+        self.data = data
+        self.model_class = model_class
+        self.args = args
+        self.test_mode = test_mode
+
+    def __getitem__(self, idx): 
+
+        # Load task from dataset. 
+        task = self.model_class.load_task_json(self.args, self.data[idx], None)[0] 
+
+        # Create dict of features from dict. 
+        feat = self.model_class.featurize(task, self.args, self.test_mode)
+
+        return (task, feat)
+
+    def __len__(self): 
+        return len(self.data)
+
+    def collate_fn(batch): 
+      
+        tasks = [e[0] for e in batch]
+        feats = [e[1] for e in batch]
+        batch = tasks # Stick to naming convention. 
+
+        pad = 0
+
+        # Will hold vectorized features. 
+        feat = {}
+
+        # Make batch out feature dicts.
+        for k in feats[0].keys(): 
+            feat[k] = [element[k] for element in feats]
+
+        # tensorization and padding
+        for k, v in feat.items():
+            if k in {'lang_goal_instr'}:
+                # language embedding and padding
+                seqs = [torch.tensor(vv) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
+                seq_lengths = np.array(list(map(len, v)))
+                feat[k] = (pad_seq, seq_lengths)
+                #embed_seq = self.emb_word(pad_seq)
+                #packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+                #feat[k] = packed_input
+            elif k in {'action_low_mask'}:
+                # mask padding
+                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
+                feat[k] = seqs
+            elif k in {'subgoal_progress', 'subgoals_completed'}:
+                # auxillary padding
+                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
+                feat[k] = pad_seq
+            else:
+                # default: tensorize and pad sequence
+                seqs = [torch.tensor(vv, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
+                feat[k] = pad_seq
+
+        return (batch, feat)  
 
 class Module(nn.Module):
+
+    # static sentinel tokens
+    pad = 0
+    seg = 1
 
     def __init__(self, args, vocab):
         '''
         Base Seq2Seq agent with common train and val loops
         '''
         super().__init__()
-
-        # sentinel tokens
-        self.pad = 0
-        self.seg = 1
 
         # args and vocab
         self.args = args
@@ -84,6 +151,16 @@ class Module(nn.Module):
             valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.preloaded_dataset)
             valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.preloaded_dataset)
 
+        # Put dataset splits into wrapper class for parallelizing data-loading. 
+        train = AlfredDataset(args, train, self.__class__, False)
+        valid_seen = AlfredDataset(args, valid_seen, self.__class__, True)
+        valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, True)
+
+        # DataLoaders
+        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn)
+        valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
+        valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
+
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)
 
@@ -105,27 +182,33 @@ class Module(nn.Module):
             self.adjust_lr(optimizer, args.lr, epoch, decay_epoch=args.decay_epoch)
             p_train = {}
             total_train_loss = list()
-            random.shuffle(train) # shuffle every epoch
-            for batch, feat in self.iterate(train, args.batch):
-                out = self.forward(feat)
-                preds = self.extract_preds(out, batch, feat)
-                p_train.update(preds)
-                loss = self.compute_loss(out, batch, feat)
-                for k, v in loss.items():
-                    ln = 'loss_' + k
-                    m_train[ln].append(v.item())
-                    self.summary_writer.add_scalar('train/' + ln, v.item(), train_iter)
+                
+            with tqdm.tqdm(train_loader, unit='batch', total=len(train_loader)) as batch_iterator:
+                for i_batch, (batch, feat) in enumerate(batch_iterator):
+                    s_time = time.time()
 
-                # optimizer backward pass
-                optimizer.zero_grad()
-                sum_loss = sum(loss.values())
-                sum_loss.backward()
-                optimizer.step()
+                    out = self.forward(feat)
+                    preds = self.extract_preds(out, batch, feat)
+                    p_train.update(preds)
+                    loss = self.compute_loss(out, batch, feat)
+                    for k, v in loss.items():
+                        ln = 'loss_' + k
+                        m_train[ln].append(v.item())
+                        self.summary_writer.add_scalar('train/' + ln, v.item(), train_iter)
 
-                self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
-                sum_loss = sum_loss.detach().cpu()
-                total_train_loss.append(float(sum_loss))
-                train_iter += self.args.batch
+                    # optimizer backward pass
+                    optimizer.zero_grad()
+                    sum_loss = sum(loss.values())
+                    sum_loss.backward()
+                    optimizer.step()
+
+                    self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
+                    sum_loss = sum_loss.detach().cpu()
+                    total_train_loss.append(float(sum_loss))
+                    train_iter += self.args.batch
+
+                    e_time = time.time()
+                    print('Batch time in seconds: {}'.format(e_time - s_time))
 
             
             print('\ntrain metrics\n')
@@ -279,18 +362,19 @@ class Module(nn.Module):
             }
         return debug
 
-    def load_task_json(self, task, subgoal=None):
+    @classmethod
+    def load_task_json(cls, args, task, subgoal=None):
         '''
         load preprocessed json from disk
         '''
-        json_path = os.path.join(self.args.data, task['task'], '%s' % self.args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        json_path = os.path.join(args.data, task['task'], '%s' % args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
         with open(json_path) as f:
             data = json.load(f)
 
         if subgoal is not None:
             
             # Will return list of subgoal datapoints. 
-            return self.filter_subgoal(data, subgoal)
+            return cls.filter_subgoal(data, subgoal)
 
         # Otherwise return list with singleton item. 
         return [data]
@@ -366,11 +450,12 @@ class Module(nn.Module):
 
         return examples
 
-    def get_task_root(self, ex):
+    @classmethod
+    def get_task_root(cls, ex, args):
         '''
         returns the folder path of a trajectory
         '''
-        return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
+        return os.path.join(args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
     def load_dataset(self, data, subgoal, dataset_type, data_path): 
 
@@ -414,19 +499,20 @@ class Module(nn.Module):
             feat = self.featurize(batch)
             yield batch, feat
 
-    def zero_input(self, x, keep_end_token=True):
+    @classmethod
+    def zero_input(cls, x, keep_end_token=True):
         '''
         pad input with zeros (used for ablations)
         '''
-        end_token = [x[-1]] if keep_end_token else [self.pad]
-        return list(np.full_like(x[:-1], self.pad)) + end_token
+        end_token = [x[-1]] if keep_end_token else [cls.pad]
+        return list(np.full_like(x[:-1], cls.pad)) + end_token
 
     def zero_input_list(self, x, keep_end_token=True):
         '''
         pad a list of input with zeros (used for ablations)
         '''
-        end_token = [x[-1]] if keep_end_token else [self.pad]
-        lz = [list(np.full_like(i, self.pad)) for i in x[:-1]] + end_token
+        end_token = [x[-1]] if keep_end_token else [pad]
+        lz = [list(np.full_like(i, pad)) for i in x[:-1]] + end_token
         return lz
 
     @staticmethod
