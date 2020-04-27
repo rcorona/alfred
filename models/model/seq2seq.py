@@ -153,8 +153,8 @@ class Module(nn.Module):
 
         # Put dataset splits into wrapper class for parallelizing data-loading. 
         train = AlfredDataset(args, train, self.__class__, False)
-        valid_seen = AlfredDataset(args, valid_seen, self.__class__, True)
-        valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, True)
+        valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
+        valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
 
         # DataLoaders
         train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn)
@@ -220,14 +220,14 @@ class Module(nn.Module):
 
             print('\nvalid seen\n')
             # compute metrics for valid_seen
-            p_valid_seen, valid_seen_iter, total_valid_seen_loss, m_valid_seen = self.run_pred(valid_seen, args=args, name='valid_seen', iter=valid_seen_iter)
+            p_valid_seen, valid_seen_iter, total_valid_seen_loss, m_valid_seen = self.run_pred(valid_seen_loader, args=args, name='valid_seen', iter=valid_seen_iter)
             m_valid_seen.update(self.compute_metric(p_valid_seen, valid_seen))
             m_valid_seen['total_loss'] = float(total_valid_seen_loss)
             self.summary_writer.add_scalar('valid_seen/total_loss', m_valid_seen['total_loss'], valid_seen_iter)
 
             # compute metrics for valid_unseen
             print('\nvalid unseen\n')
-            p_valid_unseen, valid_unseen_iter, total_valid_unseen_loss, m_valid_unseen = self.run_pred(valid_unseen, args=args, name='valid_unseen', iter=valid_unseen_iter)
+            p_valid_unseen, valid_unseen_iter, total_valid_unseen_loss, m_valid_unseen = self.run_pred(valid_unseen_loader, args=args, name='valid_unseen', iter=valid_unseen_iter)
             m_valid_unseen.update(self.compute_metric(p_valid_unseen, valid_unseen))
             m_valid_unseen['total_loss'] = float(total_valid_unseen_loss)
             self.summary_writer.add_scalar('valid_unseen/total_loss', m_valid_unseen['total_loss'], valid_unseen_iter)
@@ -300,7 +300,7 @@ class Module(nn.Module):
                         self.summary_writer.add_scalar(split + '/' + k, v, train_iter)
             pprint.pprint(stats)
 
-    def run_pred(self, dev, args=None, name='dev', iter=0):
+    def run_pred(self, dev_loader, args=None, name='dev', iter=0):
         '''
         validation loop
         '''
@@ -310,8 +310,10 @@ class Module(nn.Module):
         self.eval()
         total_loss = list()
         dev_iter = iter
-        for batch, feat in self.iterate(dev, args.batch):
-            try: 
+
+        with tqdm.tqdm(dev_loader, unit='batch', total=len(dev_loader)) as batch_iterator:
+            for i_batch, (batch, feat) in enumerate(batch_iterator):
+ 
                 out = self.forward(feat)
                 preds = self.extract_preds(out, batch, feat)
                 p_dev.update(preds)
@@ -325,8 +327,6 @@ class Module(nn.Module):
                 self.summary_writer.add_scalar("%s/loss" % (name), sum_loss, dev_iter)
                 total_loss.append(float(sum_loss.detach().cpu()))
                 dev_iter += len(batch)
-            except: 
-                continue
 
         m_dev = {k: sum(v) / len(v) for k, v in m_dev.items()}
         total_loss = sum(total_loss) / len(total_loss)
@@ -352,7 +352,7 @@ class Module(nn.Module):
         readable output generator for debugging
         '''
         debug = {}
-        for ex in data:
+        for ex, feat in data:
             if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             i = ex['task_id']
             debug[i] = {
@@ -372,7 +372,7 @@ class Module(nn.Module):
             data = json.load(f)
 
         if subgoal is not None:
-            
+
             # Will return list of subgoal datapoints. 
             return cls.filter_subgoal(data, subgoal)
 

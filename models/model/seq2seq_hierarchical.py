@@ -410,8 +410,8 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for ex in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
+        for ex, feat in data:
+            if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
             i = ex['task_id']
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
