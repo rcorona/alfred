@@ -157,7 +157,7 @@ class Module(nn.Module):
         valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
 
         # DataLoaders
-        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn)
+        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=0, collate_fn=AlfredDataset.collate_fn)
         valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
         valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
 

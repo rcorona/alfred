@@ -131,7 +131,7 @@ class Module(Base):
                 if keep[d['low_idx']] is None:
                     keep[d['low_idx']] = im[i]
             keep.append(keep[-1])  # stop frame
-            feat['frames'] = torch.stack(keep, dim=0)
+            feat['frames'] = keep
 
         #########
         # outputs
@@ -145,23 +145,62 @@ class Module(Base):
             module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for. 
             module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
-            feat['module_idxs'] = module_idxs
-
-            # Attention masks for high level controller. 
-            attn_mask = np.zeros((len(module_idxs), 8))
-            attn_mask[np.arange(len(module_idxs)),module_idxs] = 1.0
-            feat['controller_attn_mask'] = attn_mask
+            feat['module_idxs'] = np.array(module_idxs)
 
             # low-level action
             feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
+
+            # Get indexes of transitions between subgoals. 
+            transition_one_hot = np.zeros((len(feat['module_idxs']),))
+
+            curr_subgoal = feat['module_idxs'][0]
+
+            for i in range(len(transition_one_hot)): 
+                if feat['module_idxs'][i] != curr_subgoal: 
+                    transition_one_hot[i] = 1
+                    curr_subgoal = feat['module_idxs'][i]
+
+
+            # Get indexes of transition time steps.   
+            transition_idxs = np.nonzero(transition_one_hot)[0]
+
+            # Inject STOP action at each transition point. 
+            feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)[:-1]
+
+            # Get submodule idxs right before transition points. 
+            vals = feat['module_idxs'][transition_idxs - 1]
+
+            # Extend each submodule to account for STOP action.
+            feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)[:-1]
+
+            # Attention masks for high level controller. 
+            attn_mask = np.zeros((len(feat['module_idxs']), 8))
+            attn_mask[np.arange(len(feat['module_idxs'])),feat['module_idxs']] = 1.0
+            feat['controller_attn_mask'] = attn_mask
+
+            # Copy image frames to account for STOP action additions. 
+            new_frames = []
+
+            for i in range(len(feat['frames'])): 
+                
+                # If in transition, additionally add the last frame from the last time step. 
+                if transition_one_hot[i] == 1:
+                    new_frames.append(feat['frames'][i-1])
+
+                new_frames.append(feat['frames'][i])
+
+            feat['frames'] = torch.stack(new_frames[:-1])
 
             # low-level action mask
             if load_mask:
                 feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
 
             # low-level valid interact
-            feat['action_low_valid_interact'] = [a['valid_interact'] for a in ex['num']['action_low']]
-        
+            feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
+       
+            # Add invalid interactions to account for stop action. 
+            feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)[:-1]
+
         return feat
 
     @classmethod
