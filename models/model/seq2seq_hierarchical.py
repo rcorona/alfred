@@ -81,6 +81,27 @@ class Module(Base):
         self.reset()
 
     @classmethod
+    def get_transitions(cls, sequence, first_subgoal=False):
+        """
+        Get one-hot vector with ones at the inflection points between subgoal segments. 
+        """
+
+        transition_one_hot = np.zeros((len(sequence,)))
+
+        # Include value for first-subgoal if desired. 
+        if first_subgoal:
+            transition_one_hot[0] = 1
+
+        curr_subgoal = sequence[0]
+
+        for i in range(len(transition_one_hot)): 
+            if sequence[i] != curr_subgoal: 
+                transition_one_hot[i] = 1
+                curr_subgoal = sequence[i]
+
+        return transition_one_hot
+
+    @classmethod
     def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
         '''
         tensorize and pad batch input
@@ -151,32 +172,31 @@ class Module(Base):
             feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
 
             # Get indexes of transitions between subgoals. 
-            transition_one_hot = np.zeros((len(feat['module_idxs']),))
-
-            curr_subgoal = feat['module_idxs'][0]
-
-            for i in range(len(transition_one_hot)): 
-                if feat['module_idxs'][i] != curr_subgoal: 
-                    transition_one_hot[i] = 1
-                    curr_subgoal = feat['module_idxs'][i]
-
+            transition_one_hot = cls.get_transitions(feat['module_idxs'])
 
             # Get indexes of transition time steps.   
             transition_idxs = np.nonzero(transition_one_hot)[0]
 
             # Inject STOP action at each transition point. 
-            feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)[:-1]
+            feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)
+            feat['action_low'][-1] = cls.pad
 
             # Get submodule idxs right before transition points. 
             vals = feat['module_idxs'][transition_idxs - 1]
 
             # Extend each submodule to account for STOP action.
-            feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)[:-1]
+            feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
+
+            # Add High-level STOP action to high-level controller. 
+            feat['module_idxs'][-1] = 8
 
             # Attention masks for high level controller. 
-            attn_mask = np.zeros((len(feat['module_idxs']), 8))
+            attn_mask = np.zeros((len(feat['module_idxs']), 9))
             attn_mask[np.arange(len(feat['module_idxs'])),feat['module_idxs']] = 1.0
             feat['controller_attn_mask'] = attn_mask
+
+            # Used to mask loss for high-level controller. 
+            feat['controller_loss_mask'] = np.ones((len(feat['module_idxs']),))
 
             # Copy image frames to account for STOP action additions. 
             new_frames = []
@@ -189,7 +209,7 @@ class Module(Base):
 
                 new_frames.append(feat['frames'][i])
 
-            feat['frames'] = torch.stack(new_frames[:-1])
+            feat['frames'] = torch.stack(new_frames)
 
             # low-level action mask
             if load_mask:
@@ -199,7 +219,10 @@ class Module(Base):
             feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
        
             # Add invalid interactions to account for stop action. 
-            feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)[:-1]
+            feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)
+
+            # Get transition mask for training attention mechanism with STOP action in mind. 
+            feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True)
 
         return feat
 
@@ -384,8 +407,10 @@ class Module(Base):
 
         # Controller submodule attention loss.
         #attn_loss = F.mse_loss(feat['out_module_attn_scores'].float(), feat['controller_attn_mask'].float(), reduction='none').sum(-1).view(-1)
-        attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,8), feat['module_idxs'].view(-1).long(), reduction='none')
-        attn_loss = (attn_loss * pad_valid.float()).mean()
+        attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,9), feat['module_idxs'].view(-1).long(), reduction='none')
+
+        # Mask attention loss both based on each sequences length as well as subgoal transition points in each trajectory. 
+        attn_loss = (attn_loss * feat['transition_mask'].view(-1,)).mean()
         losses['controller_attn'] = attn_loss
 
         # mask loss

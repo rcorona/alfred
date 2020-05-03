@@ -217,6 +217,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.controller_attn = DotAttn()
         self.controller_h_tm1_fc = nn.Linear(dhid, dhid)
 
+        # STOP module for high level controller. 
+        self.stop_embedding = torch.nn.init.uniform_(nn.Parameter(torch.zeros((self.dhid,))))
+
         # Attention over modules. 
         self.module_attn = DotAttn()
 
@@ -248,7 +251,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         inp_t = []
 
         # Iterate over each module. 
-        for i in range(self.n_modules): 
+        for i in range  (self.n_modules): 
 
             # attend over language
             weighted_lang_ti, lang_attn_ti = self.attn[i](self.attn_dropout(lang_feat_t), self.h_tm1_fc[i](h_tm1))
@@ -271,6 +274,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
         inp_t = torch.cat(inp_t, dim=1)
         lang_attn_t = torch.cat(lang_attn_t, dim=-1)
 
+        # Add stop embedding. 
+        h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
+
         # Attend over submodules hidden states. 
         # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism. 
         _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
@@ -285,12 +291,12 @@ class ConvFrameMaskDecoderModular(nn.Module):
             module_attn = controller_mask.unsqueeze(-1)     
 
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
-        c_t = module_attn.expand_as(c_t).mul(c_t).sum(1)
-        inp_t = module_attn.expand_as(inp_t).mul(inp_t).sum(1)
-        lang_attn_t = module_attn.view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+        c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
+        inp_t = module_attn[:,:-1,:].expand_as(inp_t).mul(inp_t).sum(1)
+        lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
 
         # decode action and mask
-        cont_t = torch.cat([h_t_in, inp_t], dim=1)
+        cont_t = torch.cat([h_t_in, inp_t], dim=1) # TODO Add controller_lang_emb
         action_emb_t = self.actor(self.actor_dropout(cont_t))
         action_t = action_emb_t.mm(self.emb.weight.t())
         mask_t = self.mask_dec(cont_t)
@@ -302,7 +308,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,8)
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9)
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
