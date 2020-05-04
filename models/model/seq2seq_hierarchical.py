@@ -15,7 +15,6 @@ class Module(Base):
 
     # Static variables. 
     max_subgoals = 25
-    feat_pt = 'feat_conv.pt'
 
     # List for submodule names. 
     submodule_names = [
@@ -102,74 +101,33 @@ class Module(Base):
         return transition_one_hot
 
     @classmethod
+    def decompress_mask(self, compressed_mask):
+        '''
+        decompress mask from json files
+        '''
+        mask = np.array(decompress_mask(compressed_mask))
+        mask = np.expand_dims(mask, axis=0)
+        return mask
+
+    @classmethod
     def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
-        '''
-        tensorize and pad batch input
-        '''
-        device = torch.device('cuda') if args.gpu else torch.device('cpu')
-        feat = {}
-
-        ###########
-        # auxillary
-        ###########
-
-        if not test_mode:
-            # subgoal completion supervision
-            if args.subgoal_aux_loss_wt > 0:
-                feat['subgoals_completed'] = np.array(ex['num']['low_to_high_idx']) / cls.max_subgoals
-
-            # progress monitor supervision
-            if args.pm_aux_loss_wt > 0:
-                num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
-                subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
-                feat['subgoal_progress'] = subgoal_progress
-
-        #########
-        # inputs
-        #########
-
-        # serialize segments
-        cls.serialize_lang_action(ex, test_mode)
-
-        # goal and instr language
-        lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
-
-        # zero inputs if specified
-        lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
-        lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
-
-        # append goal + instr
-        lang_goal_instr = lang_goal + lang_instr
-        feat['lang_goal_instr'] = lang_goal_instr
-
-        # load Resnet features from disk
-        if load_frames and not test_mode:
-            root = cls.get_task_root(ex, args)
-            im = torch.load(os.path.join(root, cls.feat_pt))
-            keep = [None] * len(ex['plan']['low_actions'])
-            for i, d in enumerate(ex['images']):
-                # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
-                if keep[d['low_idx']] is None:
-                    keep[d['low_idx']] = im[i]
-            keep.append(keep[-1])  # stop frame
-            feat['frames'] = keep
-
+        feat = super().featurize(ex, args, test_mode, load_mask=load_mask, load_frames=load_frames)
         #########
         # outputs
         #########
 
         if not test_mode:
-            
-            # Ground trutch high-idx for modular model.
+            # low-level action mask
+            if load_mask:
+                feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
+
+            # Ground truth high-idx for modular model.
             high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
             module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
             module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for. 
             module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
             feat['module_idxs'] = np.array(module_idxs)
-
-            # low-level action
-            feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
 
             # Get indexes of transitions between subgoals. 
             transition_one_hot = cls.get_transitions(feat['module_idxs'])
@@ -211,13 +169,6 @@ class Module(Base):
 
             feat['frames'] = torch.stack(new_frames)
 
-            # low-level action mask
-            if load_mask:
-                feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
-
-            # low-level valid interact
-            feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
-       
             # Add invalid interactions to account for stop action. 
             feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)
 
@@ -226,28 +177,6 @@ class Module(Base):
 
         return feat
 
-    @classmethod
-    def serialize_lang_action(cls, feat, test_mode):
-        '''
-        append segmented instr language and low-level actions into single sequences
-        ''' 
-        try: 
-            is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
-            if not is_serialized:
-                feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
-                if not test_mode:
-                    feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-        except: 
-            pass#pdb.set_trace()
-
-    @classmethod
-    def decompress_mask(cls, compressed_mask):
-        '''
-        decompress mask from json files
-        '''
-        mask = np.array(decompress_mask(compressed_mask))
-        mask = np.expand_dims(mask, axis=0)
-        return mask
 
     def forward(self, feat, max_decode=300):
         
@@ -417,6 +346,8 @@ class Module(Base):
         valid_idxs = valid.view(-1).nonzero().view(-1)
         flat_p_alow_mask = p_alow_mask.view(p_alow_mask.shape[0]*p_alow_mask.shape[1], *p_alow_mask.shape[2:])[valid_idxs]
         flat_alow_mask = torch.cat(feat['action_low_mask'], dim=0)
+        if self.args.gpu:
+            flat_alow_mask = flat_alow_mask.cuda()
             
         if len(flat_alow_mask) > 0: 
             alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
@@ -447,9 +378,6 @@ class Module(Base):
         '''
         mask loss that accounts for weight-imbalance between 0 and 1 pixels
         '''
-        pred_masks = pred_masks.cuda()
-        gt_masks = gt_masks.cuda()
-        
         bce = self.bce_with_logits(pred_masks, gt_masks)
         
         flipped_mask = self.flip_tensor(gt_masks)
