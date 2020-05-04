@@ -288,7 +288,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         # Otherwise use ground truth attention. 
         else:
-            module_attn = controller_mask.unsqueeze(-1)     
+            module_attn = controller_mask.unsqueeze(-1).float()
 
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
         c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)

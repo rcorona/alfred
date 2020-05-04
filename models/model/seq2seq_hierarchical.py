@@ -410,7 +410,7 @@ class Module(Base):
         attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,9), feat['module_idxs'].view(-1).long(), reduction='none')
 
         # Mask attention loss both based on each sequences length as well as subgoal transition points in each trajectory. 
-        attn_loss = (attn_loss * feat['transition_mask'].view(-1,)).mean()
+        attn_loss = (attn_loss * feat['transition_mask'].view(-1,).float()).mean()
         losses['controller_attn'] = attn_loss
 
         # mask loss
