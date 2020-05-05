@@ -41,9 +41,7 @@ class Module(Base):
         self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
         self.input_dropout = nn.Dropout(args.input_dropout)
 
-        # internal states
-        self.state_t = None
-        self.e_t = None
+        # TODO: this is only used by leaderboard
         self.test_mode = False
 
         # bce reconstruction loss
@@ -185,7 +183,11 @@ class Module(Base):
             alow_mask = F.sigmoid(alow_mask)
             p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            pred[ex['task_id']] = {
+            key = (ex['task_id'], ex['repeat_idx'])
+
+            assert key not in pred
+
+            pred[key] = {
                 'action_low': ' '.join(words),
                 'action_low_mask': p_mask,
             }
@@ -285,9 +287,9 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex, feat in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            i = ex['task_id']
+            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
+            m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
+            m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}
