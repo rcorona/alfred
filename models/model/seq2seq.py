@@ -158,7 +158,7 @@ class Module(nn.Module):
         valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
 
         # DataLoaders
-        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=0, collate_fn=AlfredDataset.collate_fn)
+        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn)
         valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
         valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
 
@@ -186,7 +186,7 @@ class Module(nn.Module):
                 
             with tqdm.tqdm(train_loader, unit='batch', total=len(train_loader)) as batch_iterator:
                 for i_batch, (batch, feat) in enumerate(batch_iterator):
-                    s_time = time.time()
+                    #s_time = time.time()
 
                     out = self.forward(feat)
                     preds = self.extract_preds(out, batch, feat)
@@ -208,8 +208,8 @@ class Module(nn.Module):
                     total_train_loss.append(float(sum_loss))
                     train_iter += self.args.batch
 
-                    e_time = time.time()
-                    print('Batch time in seconds: {}'.format(e_time - s_time))
+                    #e_time = time.time()
+                    #print('Batch time in seconds: {}'.format(e_time - s_time))
 
             
             print('\ntrain metrics\n')
@@ -359,7 +359,8 @@ class Module(nn.Module):
             debug[i] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
-                'p_action_low': preds[i]['action_low'].split(),
+                'p_action_low': preds[i]['action_low'],
+                'p_action_high': preds[i]['controller_attn']
             }
         return debug
 
