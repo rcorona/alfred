@@ -1,5 +1,6 @@
 import os
 import random
+import tqdm
 import collections
 
 import torch
@@ -95,32 +96,30 @@ class Chunker(BaseModule):
         assert data
         for ex, feat in data:
             key = (ex['task_id'], ex['repeat_idx'])
-            pred_lang_instr_flat = [
+            lang_instr_flat = [
                 self.vocab['word'].index2word(index)
                 for index in ex['num']['lang_instr']
             ]
-            gold_lang_instr_flat = [
-                self.vocab['word'].index2word(index)
-                for index in feat['lang_instr']
-            ]
             pred_chunk_tags = preds[key]['chunk_tags']
-            pred_lang_instr_chunked = self.chunk_instruction_into_sentences(
-                pred_lang_instr_flat, pred_chunk_tags
-            )
-
-            gold_lang_instr_chunked = [
-                [word.strip().lower() for word in desc]
-                for desc in ex['ann']['instr']
-            ]
             gold_chunk_tags = feat['chunk_tags']
+
+            # took these out for now since they're slow to generate, and we can reconstruct from lang_instr and the tags
+            # pred_lang_instr_chunked = self.chunk_instruction_into_sentences(
+            #     lang_instr_flat, pred_chunk_tags
+            # )
+            # gold_lang_instr_chunked = [
+            #     [word.strip().lower() for word in desc]
+            #     for desc in ex['ann']['instr']
+            # ]
             # gold_lang_instr_chunked_ = self.chunk_instruction_into_sentences(
             #     gold_lang_instr_flat, gold_chunk_tags
             # )
             # assert gold_lang_instr_chunked_ == gold_lang_instr_chunked
 
             debug['{}--{}'.format(*key)] = {
-                'gold_lang_instr_chunked': gold_lang_instr_chunked,
-                'pred_lang_instr_chunked': pred_lang_instr_chunked,
+                'lang_instr': lang_instr_flat,
+                # 'gold_lang_instr_chunked': gold_lang_instr_chunked,
+                # 'pred_lang_instr_chunked': pred_lang_instr_chunked,
                 'pred_chunk_tags': pred_chunk_tags,
                 'gold_chunk_tags': gold_chunk_tags.cpu().tolist(),
             }
