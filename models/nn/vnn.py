@@ -422,7 +422,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         e_t = self.go.repeat(batch, 1)
         state_t = state_0
 
-        actions = []
+        action = []
         masks = []
         attn_scores = []
         subgoals = []

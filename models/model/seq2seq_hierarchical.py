@@ -10,6 +10,7 @@ from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
+from vocab.vocab import Vocab
 
 class Module(Base):
 
@@ -26,10 +27,8 @@ class Module(Base):
         'CleanObject', 
         'SliceObject', 
         'ToggleObject',
-        'NoOp'
+        'STOP'
     ]
-
-
 
     def __init__(self, args, vocab):
         '''
@@ -42,7 +41,11 @@ class Module(Base):
         # TODO remove hardcoding and base on list of module names or something. 
         n_modules = 8
 
-        # encoder and self-attention for starting state modules and high-level controller. 
+        # Add high level vocab.
+        self.vocab['high_level'] = Vocab()
+        self.vocab['high_level'].word2index(self.submodule_names, train=True)
+
+        # encoder and self-attention for starting state modules and high-level controller.
         self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
         self.enc_att = nn.ModuleList([vnn.SelfAttn(args.dhid*2) for i in range(2)]) # One for submodules and one for controller. 
 
@@ -111,69 +114,70 @@ class Module(Base):
 
     @classmethod
     def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
+        '''
+        tensorize and pad batch input
+        '''
         feat = super().featurize(ex, args, test_mode, load_mask=load_mask, load_frames=load_frames)
         #########
         # outputs
         #########
 
-        if not test_mode:
-            # low-level action mask
-            if load_mask:
-                feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
+        if load_mask:
+            feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
 
-            # Ground truth high-idx for modular model.
-            high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
-            module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
-            module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for. 
-            module_idxs = [cls.submodule_names.index(name) for name in module_names]
+        # Ground truth high-idx for modular model.
+        high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
+        module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
+        module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for.
+        module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
-            feat['module_idxs'] = np.array(module_idxs)
+        feat['module_idxs'] = np.array(module_idxs)
 
-            # Get indexes of transitions between subgoals. 
-            transition_one_hot = cls.get_transitions(feat['module_idxs'])
+        # Get indexes of transitions between subgoals.
+        transition_one_hot = cls.get_transitions(feat['module_idxs'])
 
-            # Get indexes of transition time steps.   
-            transition_idxs = np.nonzero(transition_one_hot)[0]
+        # Get indexes of transition time steps.
+        transition_idxs = np.nonzero(transition_one_hot)[0]
 
-            # Inject STOP action at each transition point. 
-            feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)
-            feat['action_low'][-1] = cls.pad
+        # Inject STOP action at each transition point.
+        feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)
+        feat['action_low'][-1] = cls.pad
 
-            # Get submodule idxs right before transition points. 
-            vals = feat['module_idxs'][transition_idxs - 1]
+        # Get submodule idxs right before transition points.
+        vals = feat['module_idxs'][transition_idxs - 1]
 
-            # Extend each submodule to account for STOP action.
-            feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
+        # Extend each submodule to account for STOP action.
+        feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
 
-            # Add High-level STOP action to high-level controller. 
-            feat['module_idxs'][-1] = 8
+        # Add High-level STOP action to high-level controller.
+        feat['module_idxs'][-1] = 8
 
-            # Attention masks for high level controller. 
-            attn_mask = np.zeros((len(feat['module_idxs']), 9))
-            attn_mask[np.arange(len(feat['module_idxs'])),feat['module_idxs']] = 1.0
-            feat['controller_attn_mask'] = attn_mask
+        # Attention masks for high level controller.
+        attn_mask = np.zeros((len(feat['module_idxs']), 9))
+        attn_mask[np.arange(len(feat['module_idxs'])),feat['module_idxs']] = 1.0
+        feat['controller_attn_mask'] = attn_mask
 
-            # Used to mask loss for high-level controller. 
-            feat['controller_loss_mask'] = np.ones((len(feat['module_idxs']),))
+        # Used to mask loss for high-level controller.
+        feat['controller_loss_mask'] = np.ones((len(feat['module_idxs']),))
 
-            # Copy image frames to account for STOP action additions. 
-            new_frames = []
+        # Copy image frames to account for STOP action additions.
+        new_frames = []
 
-            for i in range(len(feat['frames'])): 
-                
-                # If in transition, additionally add the last frame from the last time step. 
-                if transition_one_hot[i] == 1:
-                    new_frames.append(feat['frames'][i-1])
+        for i in range(len(feat['frames'])):
 
-                new_frames.append(feat['frames'][i])
+            # If in transition, additionally add the last frame from the last time step.
+            if transition_one_hot[i] == 1:
+                new_frames.append(feat['frames'][i-1])
 
-            feat['frames'] = torch.stack(new_frames)
+            new_frames.append(feat['frames'][i])
 
-            # Add invalid interactions to account for stop action. 
-            feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)
+        feat['frames'] = torch.stack(new_frames)
 
-            # Get transition mask for training attention mechanism with STOP action in mind. 
-            feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True)
+        # Add invalid interactions to account for stop action.
+        feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)
+
+        # Get transition mask for training attention mechanism with STOP action in mind.
+        feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True)
 
         return feat
 
@@ -274,30 +278,47 @@ class Module(Base):
         output processing
         '''
         pred = {}
-        for ex, alow, alow_mask in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask']):
+
+        for ex, alow, alow_mask, controller_attn in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask'],
+                feat['out_module_attn_scores'].max(2)[1].tolist()):
+            """
             # remove padding tokens
             if self.pad in alow:
                 pad_start_idx = alow.index(self.pad)
                 alow = alow[:pad_start_idx]
                 alow_mask = alow_mask[:pad_start_idx]
+            """
 
             if clean_special_tokens:
+
+                # Stop each trajectory after high-level controller stops.
+                if 8 in controller_attn:
+                    stop_start_idx = controller_attn.index(8)
+                    alow = alow[:stop_start_idx]
+                    controller_attn = controller_attn[:stop_start_idx]
+                    alow_mask = alow_mask[:stop_start_idx]
+
+                """
                 # remove <<stop>> tokens
                 if self.stop_token in alow:
                     stop_start_idx = alow.index(self.stop_token)
                     alow = alow[:stop_start_idx]
                     alow_mask = alow_mask[:stop_start_idx]
+                """
 
             # index to API actions
-            words = self.vocab['action_low'].index2word(alow)
+            #words = self.vocab['action_low'].index2word(alow)
 
             # sigmoid preds to binary mask
             alow_mask = F.sigmoid(alow_mask)
             p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            pred[ex['task_id']] = {
-                'action_low': ' '.join(words),
+            key = (ex['task_id'], ex['repeat_idx'])
+
+            pred[key] = {
+                'action_low': alow,
                 'action_low_mask': p_mask,
+                'controller_attn': controller_attn
             }
 
         return pred
@@ -348,7 +369,7 @@ class Module(Base):
         flat_alow_mask = torch.cat(feat['action_low_mask'], dim=0)
         if self.args.gpu:
             flat_alow_mask = flat_alow_mask.cuda()
-            
+
         if len(flat_alow_mask) > 0: 
             alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
             losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
@@ -403,9 +424,31 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex, feat in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
-            i = ex['task_id']
-            label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
+            # if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
+            # feat should already contain the following, since all AlfredDataset s which are fed into this function have test_mode=False
+            # feat = self.featurize(ex, self.args, False, load_mask=True, load_frames=True)
+
+            # Evaluate low level actions.
+            label = ' '.join(self.vocab['action_low'].index2word(feat['action_low'].tolist()))
+            pred = ' '.join(self.vocab['action_low'].index2word(preds[key]['action_low']))
+
+            m['action_low_f1'].append(compute_f1(label.lower(), pred.lower()))
+            m['action_low_em'].append(compute_exact(label.lower(), pred.lower()))
+
+            # Evaluate high-level controller.
+            # Get indexes of predicted transitions.
+            stop_idxs = np.argwhere(np.array(preds[key]['action_low'])[:-1] == 2).flatten()
+            high_idxs = np.append([0], stop_idxs + 1).astype(np.int32)
+
+            # Get predicted submodule transitions
+            pred_high_idx = np.array(preds[key]['controller_attn'])[high_idxs]
+            label_high_idx = feat['module_idxs'][np.nonzero(feat['transition_mask'])]
+
+            pred = ' '.join(self.vocab['high_level'].index2word(pred_high_idx.tolist()))
+            label = ' '.join(self.vocab['high_level'].index2word(label_high_idx.tolist()))
+
+            m['action_high_f1'].append(compute_f1(label.lower(), pred.lower()))
+            m['action_high_em'].append(compute_exact(label.lower(), pred.lower()))
+
         return {k: sum(v)/len(v) for k, v in m.items()}

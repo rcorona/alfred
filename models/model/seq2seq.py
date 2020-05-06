@@ -45,16 +45,15 @@ class Module(BaseModule):
         # auxillary
         ###########
 
-        if not test_mode:
-            # subgoal completion supervision
-            if args.subgoal_aux_loss_wt > 0:
-                feat['subgoals_completed'] = np.array(ex['num']['low_to_high_idx']) / cls.max_subgoals
+        # subgoal completion supervision
+        if args.subgoal_aux_loss_wt > 0:
+            feat['subgoals_completed'] = np.array(ex['num']['low_to_high_idx']) / cls.max_subgoals
 
-            # progress monitor supervision
-            if args.pm_aux_loss_wt > 0:
-                num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
-                subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
-                feat['subgoal_progress'] = subgoal_progress
+        # progress monitor supervision
+        if args.pm_aux_loss_wt > 0:
+            num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
+            subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
+            feat['subgoal_progress'] = subgoal_progress
 
         #########
         # inputs
@@ -108,11 +107,14 @@ class Module(BaseModule):
         for ex, feat in data:
             # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
-            debug['{}--{}'.format(*key)] = {
+            this_debug = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
-                'p_action_low': preds[key]['action_low'].split(),
+                'p_action_low': preds[key]['action_low'],
             }
+            if 'controller_attn' in preds[key]:
+                this_debug['p_action_high'] = preds[key]['controller_attn']
+            debug['{}--{}'.format(*key)] = this_debug
         return debug
 
     @classmethod
