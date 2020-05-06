@@ -5,7 +5,7 @@ from PIL import Image
 from datetime import datetime
 from eval import Eval
 from env.thor_env import ThorEnv
-
+import pdb
 
 class EvalHierarchical(Eval):
     '''
@@ -27,7 +27,7 @@ class EvalHierarchical(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(task)[0]
+                traj = model.load_task_json(model.args, task)[0]
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))
@@ -51,7 +51,8 @@ class EvalHierarchical(Eval):
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
         # extract language features
-        feat = model.featurize([traj_data], load_mask=False)
+        feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
+        feat = model.tensorize(feat)
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']
@@ -75,13 +76,18 @@ class EvalHierarchical(Eval):
             m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
             m_pred = list(m_pred.values())[0]
 
-            # check if <<stop>> was predicted
-            if m_pred['action_low'] == cls.STOP_TOKEN:
+            # check if <<stop>> was predicted for both low-level and high-level controller. 
+            if m_pred['controller_attn'][0] == 8: 
                 print("\tpredicted STOP")
                 break
 
+            # If we are switching submodules, then skip this step. 
+            elif m_pred['action_low'][0] == 2: 
+                continue
+
             # get action and mask
             action, mask = m_pred['action_low'], m_pred['action_low_mask'][0]
+            action = model.vocab['action_low'].index2word(m_pred['action_low'])[0]
             mask = np.squeeze(mask, axis=0) if model.has_interaction(action) else None
 
             # print action
