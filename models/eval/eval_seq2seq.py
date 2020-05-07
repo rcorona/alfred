@@ -44,6 +44,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_teacher_force_unroll_with_expert', action='store_true', help='no teacher forcing with expert')
 
     parser.add_argument('--modular_subgoals', action='store_true', help='this model was trained with the --subgoal argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+    parser.add_argument('--oracle', action='store_true', help='Use oracle for high-level controller.')
 
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')

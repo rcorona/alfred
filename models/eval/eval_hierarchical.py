@@ -50,8 +50,11 @@ class EvalHierarchical(Eval):
         reward_type = 'dense'
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
-        # extract language features
+        # Extract language and high-level module indexes. 
         feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
+        
+        # Post process subgoals from names to indexes.
+        feat['module_idxs'] = model.vocab['high_level'].word2index(feat['module_idxs'])
         feat = model.tensorize(feat)
 
         # goal instr
@@ -72,7 +75,7 @@ class EvalHierarchical(Eval):
             feat['frames'] = resnet.featurize([curr_image], batch=1).unsqueeze(1)
 
             # forward model
-            m_out = model.step(feat)
+            m_out = model.step(feat, oracle=args.oracle)
             m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
             m_pred = list(m_pred.values())[0]
 

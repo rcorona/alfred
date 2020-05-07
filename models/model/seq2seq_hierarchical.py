@@ -28,7 +28,7 @@ class Module(Base):
         'CleanObject', 
         'SliceObject', 
         'ToggleObject',
-        'STOP'
+        'NoOp'
     ]
 
     def __init__(self, args, vocab):
@@ -159,9 +159,14 @@ class Module(Base):
         #########
         # outputs
         #########
+        
+        # Only get ground truth high level pddl plan. 
+        if test_mode:
 
-        if not test_mode: 
-                
+            feat['module_idxs'] = [subgoal['discrete_action']['action'] for subgoal in ex['plan']['high_pddl']]             
+
+        else:
+
             # Ground trutch high-idx for modular model.
             high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
             module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
@@ -256,6 +261,11 @@ class Module(Base):
                 seq_length = len(v)
                 feat[k] = (seq, seq_length)
 
+            else:
+                # default: tensorize and pad sequence
+                seq = torch.tensor(v, dtype=torch.long)
+                feat[k] = seq
+
         return feat
 
     @classmethod
@@ -338,10 +348,11 @@ class Module(Base):
             'e_t': None,
             'cont_lang': None,
             'enc_lang': None,
-            'subgoal': None
+            'subgoal': None,
+            'subgoal_counter': 0
         }
 
-    def step(self, feat, prev_action=None):
+    def step(self, feat, prev_action=None, oracle=False):
         '''
         forward the model for a single time-step (used for real-time execution during eval)
         '''
@@ -356,6 +367,20 @@ class Module(Base):
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
             self.r_state['state_t'] = self.r_state['cont_lang'][0], torch.zeros_like(self.r_state['cont_lang'][0])
             self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
+
+        if self.r_state['subgoal_counter'] == 0:
+
+            # Force subgoal module selection if using oracle. 
+            if oracle: 
+                controller_mask = torch.zeros(1, 9).float()
+                controller_mask[:,feat['module_idxs'][0]] = 1.0
+                
+                if self.args.gpu:
+                    controller_mask = controller_mask.cuda()
+
+                self.r_state['subgoal'] = controller_mask
+
+            self.r_state['subgoal_counter'] += 1
 
         # previous action embedding
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
@@ -373,13 +398,19 @@ class Module(Base):
         # Select next subgoal module to pay attention to. 
         if self.r_state['subgoal'] is None: 
 
-            # Only pay attention to a single module. 
-            max_subgoal = controller_attn_logits.max(2)[1].squeeze()
-            
+            # Either use max over attention or oracle subgoal selection. 
+            if oracle: 
+                max_subgoal = feat['module_idxs'][self.r_state['subgoal_counter']]
+
+            else:
+                # Only pay attention to a single module.
+                max_subgoal = controller_attn_logits.max(2)[1].squeeze()
+                
             module_attn = torch.zeros_like(out_controller_attn).view(1,-1)
             module_attn[:,max_subgoal] = 1.0
 
             self.r_state['subgoal'] = module_attn
+            self.r_state['subgoal_counter'] += 1
 
         # save states
         self.r_state['state_t'] = state_t
