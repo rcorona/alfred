@@ -445,8 +445,14 @@ class Module(Base):
             label = ' '.join(self.vocab['action_low'].index2word(feat['action_low'].tolist()))
             pred = ' '.join(self.vocab['action_low'].index2word(preds[key]['action_low']))
 
-            m['action_low_f1'].append(compute_f1(label.lower(), pred.lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), pred.lower()))
+            label_lower = label.lower()
+            pred_lower = pred.lower()
+
+            m['action_low_f1'].append(compute_f1(label_lower, pred_lower))
+            m['action_low_em'].append(compute_exact(label_lower, pred_lower))
+            m['action_low_gold_length'].append(len(label.split()))
+            m['action_low_pred_length'].append(len(pred.split()))
+            m['action_low_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
 
             # Evaluate high-level controller.
             # Get indexes of predicted transitions.
