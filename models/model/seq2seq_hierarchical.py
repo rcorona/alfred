@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
-from models.utils.metric import compute_f1, compute_exact
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
 from vocab.vocab import Vocab
@@ -460,7 +460,14 @@ class Module(Base):
             pred = ' '.join(self.vocab['high_level'].index2word(pred_high_idx.tolist()))
             label = ' '.join(self.vocab['high_level'].index2word(label_high_idx.tolist()))
 
-            m['action_high_f1'].append(compute_f1(label.lower(), pred.lower()))
-            m['action_high_em'].append(compute_exact(label.lower(), pred.lower()))
+            label_lower = label.lower()
+            pred_lower = pred.lower()
+
+            m['action_high_f1'].append(compute_f1(label_lower, pred_lower))
+            m['action_high_em'].append(compute_exact(label_lower, pred_lower))
+
+            m['action_high_gold_length'].append(len(label.split()))
+            m['action_high_pred_length'].append(len(pred.split()))
+            m['action_high_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
 
         return {k: sum(v)/len(v) for k, v in m.items()}
