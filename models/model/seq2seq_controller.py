@@ -8,6 +8,8 @@ from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
 from model.seq2seq_im_mask import Module as Seq2SeqIM
+
+from models.model.base import move_dict_to_cuda
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -187,7 +189,9 @@ class Module(Base):
         return feat
 
     def forward(self, feat, max_decode=25):
-        
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
+
         cont_lang, enc_lang = self.encode_lang(feat)
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])

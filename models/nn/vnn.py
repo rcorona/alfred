@@ -282,9 +282,15 @@ class ConvFrameMaskDecoderModular(nn.Module):
         _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
         module_attn_logits = self.controller_attn.raw_score
 
-        # If no ground truth attention is provided, then used inferred values.  
+        # If no supervised/forced attention is provided, then used inferred values.  
         if controller_mask is None: 
             module_attn = module_scores
+
+            # Only pay attention to a single module. 
+            max_subgoal = module_attn.max(1)[1].squeeze()
+            
+            module_attn = torch.zeros_like(module_attn)
+            module_attn[:,max_subgoal,:] = 1.0
 
         # Otherwise use ground truth attention. 
         else:
@@ -308,7 +314,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9)
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9), module_attn
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
@@ -329,7 +335,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             else: 
                 controller_mask_in = controller_mask[:,t]
 
-            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
+            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)

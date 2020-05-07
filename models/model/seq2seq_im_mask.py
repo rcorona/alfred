@@ -11,6 +11,9 @@ from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
 
+from models.model.base import embed_packed_sequence, move_dict_to_cuda
+
+
 class Module(Base):
 
     def __init__(self, args, vocab):
@@ -76,25 +79,10 @@ class Module(Base):
         return feat
 
     def forward(self, feat, max_decode=300):
-        # Finish vectorizing language. 
-        pad_seq, seq_lengths = feat['lang_goal_instr']
-        
-        if self.args.gpu: 
-            pad_seq = pad_seq.cuda()
-        
-        embed_seq = self.emb_word(pad_seq)
-        packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-        feat['lang_goal_instr'] = packed_input
-
-        # Move everything onto gpu if needed.
-        if self.args.gpu: 
-            for k in feat:
-                if hasattr(feat[k], 'cuda'):
-                    feat[k] = feat[k].cuda()
-
-        #pdb.set_trace()
-
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
         cont_lang, enc_lang = self.encode_lang(feat)
+
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
         res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
@@ -106,7 +94,7 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
-        emb_lang_goal_instr = feat['lang_goal_instr']
+        emb_lang_goal_instr = embed_packed_sequence(self.emb_word, feat['lang_goal_instr'])
         self.lang_dropout(emb_lang_goal_instr.data)
         enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
         enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)

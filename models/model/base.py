@@ -11,10 +11,31 @@ import numpy as np
 import torch
 import tqdm
 from torch import nn
-from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, PackedSequence
 from torch.utils.data import Dataset, DataLoader
 from tqdm import trange
 from tensorboardX import SummaryWriter
+
+from collections.abc import MutableMapping
+
+# data utilities
+def embed_packed_sequence(embeddings: nn.Embedding, packed_sequence: PackedSequence):
+    return PackedSequence(embeddings(packed_sequence.data),
+                          batch_sizes=packed_sequence.batch_sizes,
+                          sorted_indices=packed_sequence.sorted_indices,
+                          unsorted_indices=packed_sequence.unsorted_indices)
+
+def move_dict_to_cuda(dictionary):
+    for k, v in dictionary.items():
+        if hasattr(v, 'cuda'):
+            dictionary[k] = v.cuda()
+    return dictionary
+
+def tensorize(vv, name):
+    if isinstance(vv, torch.Tensor):
+        return vv
+    else:
+        return torch.tensor(vv, dtype=torch.float if ('frames' in name) else torch.long)
 
 class AlfredDataset(Dataset):
     def __init__(self, args, data, model_class, test_mode):
@@ -36,8 +57,8 @@ class AlfredDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    @staticmethod
     def collate_fn(batch):
-
         tasks = [e[0] for e in batch]
         feats = [e[1] for e in batch]
         batch = tasks # Stick to naming convention.
@@ -57,11 +78,17 @@ class AlfredDataset(Dataset):
                 # language embedding and padding
                 seqs = [torch.tensor(vv) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
+                # Singleton corner case.
+                if pad_seq.dim() == 1:
+                    pad_seq = pad_seq.unsqueeze(0)
+                assert pad_seq.dim() == 2
                 seq_lengths = np.array(list(map(len, v)))
-                feat[k] = (pad_seq, seq_lengths)
+                # pack the sequences for now; we can embed them later
+                # feat[k] = (pad_seq, seq_lengths)
                 #embed_seq = self.emb_word(pad_seq)
-                #packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                #feat[k] = packed_input
+                # packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+                packed_input = pack_padded_sequence(pad_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+                feat[k] = packed_input
             elif k in {'action_low_mask'}:
                 # mask padding
                 seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
@@ -81,12 +108,11 @@ class AlfredDataset(Dataset):
                 feat[k] = torch.tensor(v, dtype=torch.long)
             else:
                 # default: tensorize and pad sequence
-                seqs = [torch.tensor(vv, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
+                seqs = [tensorize(vv, k) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
                 feat[k] = pad_seq
 
         return (batch, feat)
-
 
 class BaseModule(nn.Module):
     """inheritable by seq2seq and instruction chunker"""
@@ -327,10 +353,13 @@ class BaseModule(nn.Module):
         valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
         valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
 
+        # this didn't seem to give a speedup
+        pin_memory = False
+
         # DataLoaders
-        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn)
-        valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
-        valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn)
+        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
+        valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
+        valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
 
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)

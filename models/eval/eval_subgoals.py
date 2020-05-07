@@ -7,6 +7,8 @@ from datetime import datetime
 from env.thor_env import ThorEnv
 from eval import Eval
 
+from models.model.base import AlfredDataset, move_dict_to_cuda
+
 
 class EvalSubgoals(Eval):
     '''
@@ -41,7 +43,7 @@ class EvalSubgoals(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(task)[0]
+                traj = model.load_task_json(model.args, task)[0]
                 if args.modular_subgoals:
                     filtered_traj_by_subgoal = {
                         subgoal: model.load_task_json(task, subgoal)
@@ -91,7 +93,11 @@ class EvalSubgoals(Eval):
             to_input = traj_data
 
         # extract language features
-        feat = model.featurize([to_input], load_mask=False)
+        feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
+        # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
+        feat = AlfredDataset.collate_fn([(None, feat)])[1]
+        if args.gpu:
+            move_dict_to_cuda(feat)
 
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None

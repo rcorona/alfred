@@ -8,8 +8,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
-from models.model.base import BaseModule
+from models.model.base import BaseModule, move_dict_to_cuda
 from models.nn import vnn
+
+from models.model.base import embed_packed_sequence
 
 def compute_acc(gold, pred):
     assert len(gold) == len(pred), (gold, pred)
@@ -129,7 +131,7 @@ class Chunker(BaseModule):
         '''
         encode goal+instr language
         '''
-        emb_lang_instr = feat['lang_instr']
+        emb_lang_instr = embed_packed_sequence(self.emb_word, feat['lang_instr'])
         # apply dropout in-place
         self.lang_dropout(emb_lang_instr.data)
         emb_lang_instr, _ = self.enc(emb_lang_instr)
@@ -142,21 +144,9 @@ class Chunker(BaseModule):
         # return cont_lang_instr, emb_lang_instr
 
     def forward(self, feat, max_decode=None):
-        # Finish vectorizing language.
-        pad_seq, seq_lengths = feat['lang_instr']
-
-        if self.args.gpu:
-            pad_seq = pad_seq.cuda()
-
-        embed_seq = self.emb_word(pad_seq)
-        packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-        feat['lang_instr'] = packed_input
-
         # Move everything onto gpu if needed.
         if self.args.gpu:
-            for k in feat:
-                if hasattr(feat[k], 'cuda'):
-                    feat[k] = feat[k].cuda()
+            move_dict_to_cuda(feat)
 
         enc_lang = self.encode_lang(feat)
         chunk_tag_logits = self.chunk_pred_layer(enc_lang)

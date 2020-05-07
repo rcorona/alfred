@@ -15,6 +15,8 @@ class Module(BaseModule):
     # Static variables.
     feat_pt = 'feat_conv.pt'
 
+    max_subgoals = 25
+
     def __init__(self, args, vocab):
         '''
         Base Seq2Seq agent with common train and val loops
