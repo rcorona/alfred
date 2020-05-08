@@ -52,7 +52,6 @@ class Module(Base):
 
         # paths
         self.root_path = os.getcwd()
-        self.feat_pt = 'feat_conv.pt'
 
         # params
         self.max_subgoals = 25
@@ -60,116 +59,7 @@ class Module(Base):
         # reset model
         self.reset()
 
-    def featurize(self, batch, load_mask=True, load_frames=True):
-        '''
-        tensorize and pad batch input
-        '''
-        device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-        feat = collections.defaultdict(list)
-
-        for ex in batch:
-            ###########
-            # auxillary
-            ###########
-
-            if not self.test_mode:
-                # subgoal completion supervision
-                if self.args.subgoal_aux_loss_wt > 0:
-                    feat['subgoals_completed'].append(np.array(ex['num']['low_to_high_idx']) / self.max_subgoals)
-
-                # progress monitor supervision
-                if self.args.pm_aux_loss_wt > 0:
-                    num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
-                    subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
-                    feat['subgoal_progress'].append(subgoal_progress)
-
-            #########
-            # inputs
-            #########
-
-            # serialize segments
-            self.serialize_lang_action(ex)
-
-            # goal and instr language
-            lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
-
-            # zero inputs if specified
-            lang_goal = self.zero_input(lang_goal) if self.args.zero_goal else lang_goal
-            lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
-
-            # append goal + instr
-            lang_goal_instr = lang_goal + lang_instr
-            feat['lang_goal_instr'].append(lang_goal_instr)
-
-            # load Resnet features from disk
-            if load_frames and not self.test_mode:
-                root = self.get_task_root(ex)
-                im = torch.load(os.path.join(root, self.feat_pt))
-                keep = [None] * len(ex['plan']['low_actions'])
-                for i, d in enumerate(ex['images']):
-                    # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
-                    if keep[d['low_idx']] is None:
-                        keep[d['low_idx']] = im[i]
-                keep.append(keep[-1])  # stop frame
-                feat['frames'].append(torch.stack(keep, dim=0))
-
-
-            #########
-            # outputs
-            #########
-
-            if not self.test_mode:
-                # low-level action
-                feat['action_low'].append([a['action'] for a in ex['num']['action_low']])
-
-                # low-level action mask
-                if load_mask:
-                    feat['action_low_mask'].append([self.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None])
-
-                # low-level valid interact
-                feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
-
-        # tensorization and padding
-        for k, v in feat.items():
-            if k in {'lang_goal_instr'}:
-                # language embedding and padding
-                seqs = [torch.tensor(vv, device=device) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                seq_lengths = np.array(list(map(len, v)))
-                embed_seq = self.emb_word(pad_seq)
-                packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                feat[k] = packed_input
-            elif k in {'action_low_mask'}:
-                # mask padding
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
-                feat[k] = seqs
-            elif k in {'subgoal_progress', 'subgoals_completed'}:
-                # auxillary padding
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                feat[k] = pad_seq
-            else:
-                # default: tensorize and pad sequence
-                seqs = [torch.tensor(vv, device=device, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
-                feat[k] = pad_seq
-
-        return feat
-
-
-    def serialize_lang_action(self, feat):
-        '''
-        append segmented instr language and low-level actions into single sequences
-        ''' 
-        try: 
-            is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
-            if not is_serialized:
-                feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
-                if not self.test_mode:
-                    feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-        except: 
-            pass#pdb.set_trace()
-
+    @classmethod
     def decompress_mask(self, compressed_mask):
         '''
         decompress mask from json files
@@ -178,9 +68,34 @@ class Module(Base):
         mask = np.expand_dims(mask, axis=0)
         return mask
 
+    @classmethod
+    def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
+        feat = super().featurize(ex, args, test_mode, load_mask=load_mask, load_frames=load_frames)
+        if not test_mode:
+            # low-level action mask
+            if load_mask:
+                feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
+        return feat
 
     def forward(self, feat, max_decode=300):
+        # Finish vectorizing language. 
+        pad_seq, seq_lengths = feat['lang_goal_instr']
+        
+        if self.args.gpu: 
+            pad_seq = pad_seq.cuda()
+        
+        embed_seq = self.emb_word(pad_seq)
+        packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+        feat['lang_goal_instr'] = packed_input
+
+        # Move everything onto gpu if needed.
+        if self.args.gpu: 
+            for k in feat:
+                if hasattr(feat[k], 'cuda'):
+                    feat[k] = feat[k].cuda()
+
         #pdb.set_trace()
+
         cont_lang, enc_lang = self.encode_lang(feat)
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
@@ -302,7 +217,7 @@ class Module(Base):
 
         # action loss
         pad_valid = (l_alow != self.pad)
-        
+
         alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
 
         alow_loss *= pad_valid.float()
@@ -313,8 +228,10 @@ class Module(Base):
         valid_idxs = valid.view(-1).nonzero().view(-1)
         flat_p_alow_mask = p_alow_mask.view(p_alow_mask.shape[0]*p_alow_mask.shape[1], *p_alow_mask.shape[2:])[valid_idxs]
         flat_alow_mask = torch.cat(feat['action_low_mask'], dim=0)
-            
-        if len(flat_alow_mask) > 0: 
+        if self.args.gpu:
+            flat_alow_mask = flat_alow_mask.cuda()
+
+        if len(flat_alow_mask) > 0:
             alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
             losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
 
@@ -343,15 +260,12 @@ class Module(Base):
         '''
         mask loss that accounts for weight-imbalance between 0 and 1 pixels
         '''
-        try:
-            bce = self.bce_with_logits(pred_masks, gt_masks)
-        except: 
-            pdb.set_trace()
-        
+        bce = self.bce_with_logits(pred_masks, gt_masks)
+
         flipped_mask = self.flip_tensor(gt_masks)
         inside = (bce * gt_masks).sum() / (gt_masks).sum()
         outside = (bce * flipped_mask).sum() / (flipped_mask).sum()
-        
+
         return inside + outside
 
 
@@ -370,7 +284,7 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for ex in data:
+        for ex, feat in data:
             if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             i = ex['task_id']
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])

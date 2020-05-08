@@ -87,6 +87,9 @@ class Module(nn.Module):
     pad = 0
     seg = 1
 
+    # Static variables.
+    feat_pt = 'feat_conv.pt'
+
     def __init__(self, args, vocab):
         '''
         Base Seq2Seq agent with common train and val loops
@@ -333,8 +336,82 @@ class Module(nn.Module):
         total_loss = sum(total_loss) / len(total_loss)
         return p_dev, dev_iter, total_loss, m_dev
 
-    def featurize(self, batch):
-        raise NotImplementedError()
+    @classmethod
+    def serialize_lang_action(cls, feat, test_mode):
+        '''
+        append segmented instr language and low-level actions into single sequences
+        '''
+        is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
+        if not is_serialized:
+            feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
+            if not test_mode:
+                feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
+
+    @classmethod
+    def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
+        '''
+        tensorize and pad batch input
+        '''
+        feat = {}
+
+        ###########
+        # auxillary
+        ###########
+
+        if not test_mode:
+            # subgoal completion supervision
+            if args.subgoal_aux_loss_wt > 0:
+                feat['subgoals_completed'] = np.array(ex['num']['low_to_high_idx']) / cls.max_subgoals
+
+            # progress monitor supervision
+            if args.pm_aux_loss_wt > 0:
+                num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
+                subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
+                feat['subgoal_progress'] = subgoal_progress
+
+        #########
+        # inputs
+        #########
+
+        # serialize segments
+        cls.serialize_lang_action(ex, test_mode)
+
+        # goal and instr language
+        lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+
+        # zero inputs if specified
+        lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
+        lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
+
+        # append goal + instr
+        lang_goal_instr = lang_goal + lang_instr
+        feat['lang_goal_instr'] = lang_goal_instr
+
+        # load Resnet features from disk
+        if load_frames and not test_mode:
+            root = cls.get_task_root(ex, args)
+            im = torch.load(os.path.join(root, cls.feat_pt))
+            keep = [None] * len(ex['plan']['low_actions'])
+            for i, d in enumerate(ex['images']):
+                # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+                if keep[d['low_idx']] is None:
+                    keep[d['low_idx']] = im[i]
+            keep.append(keep[-1])  # stop frame
+            feat['frames'] = torch.stack(keep, dim=0)
+
+
+        #########
+        # outputs
+        #########
+
+        if not test_mode:
+            # low-level action
+            feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
+
+            # low-level valid interact
+            feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
+
+        return feat
 
     def forward(self, feat, max_decode=100):
         raise NotImplementedError()
