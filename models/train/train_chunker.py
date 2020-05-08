@@ -33,6 +33,7 @@ def make_parser():
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/chunker')
     parser.add_argument('--resume', help='load a checkpoint')
+    parser.add_argument('--num_workers', type=int, default=8, help='number of threads to use in DataLoaders')
     parser.add_argument('--batch', help='batch size', default=8, type=int)
     parser.add_argument('--epoch', help='number of epochs', default=20, type=int)
     parser.add_argument('--lr', help='optimizer learning rate', default=1e-4, type=float)

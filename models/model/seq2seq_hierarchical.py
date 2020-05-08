@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import nn.vnn as vnn
 import collections
+import tqdm
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
@@ -174,7 +175,8 @@ class Module(Base):
 
                 new_frames.append(feat['frames'][i])
 
-            feat['frames'] = torch.stack(new_frames)
+            feat['frames'] = np.stack(new_frames)
+            # feat['frames'] = torch.stack(new_frames)
 
             # low-level action mask was here, but is now created in the super class
 
@@ -435,7 +437,7 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for ex, feat in data:
+        for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             # feat should already contain the following, since all AlfredDataset s which are fed into this function have test_mode=False

@@ -357,9 +357,9 @@ class BaseModule(nn.Module):
         pin_memory = False
 
         # DataLoaders
-        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
-        valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
-        valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=8, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
+        train_loader = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=args.num_workers, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
+        valid_seen_loader = DataLoader(valid_seen, batch_size=args.batch, shuffle=False, num_workers=args.num_workers, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
+        valid_unseen_loader = DataLoader(valid_unseen, batch_size=args.batch, shuffle=False, num_workers=args.num_workers, collate_fn=AlfredDataset.collate_fn, pin_memory=pin_memory)
 
         # initialize summary writer for tensorboardX
         self.summary_writer = SummaryWriter(log_dir=args.dout)
