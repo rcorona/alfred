@@ -8,6 +8,8 @@ from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
 from model.seq2seq_im_mask import Module as Seq2SeqIM
+
+from models.model.base import move_dict_to_cuda
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -187,7 +189,9 @@ class Module(Base):
         return feat
 
     def forward(self, feat, max_decode=25):
-        
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
+
         cont_lang, enc_lang = self.encode_lang(feat)
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
@@ -254,12 +258,12 @@ class Module(Base):
         '''
         debug = {}
         for ex in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            i = ex['task_id']
-            debug[i] = {
+            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
+            debug[key] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
-                'p_action_high': preds[i]['action_high'].split(),
+                'p_action_high': preds[key]['action_high'].split(),
             }
         return debug
 
@@ -277,7 +281,8 @@ class Module(Base):
             # index to API actions
             words = self.high_vocab.index2word(ahigh)
 
-            pred[ex['task_id']] = {
+            key = (ex['task_id'], ex['repeat_idx'])
+            pred[key] = {
                 'action_high': ' '.join(words),
             }
 
@@ -313,13 +318,12 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex in data:
-            
             # Load task.
-            if 'repeat_idx'in ex: ex = self.load_task_json(ex, None)[0]
-            i = ex['task_id']
+            # if 'repeat_idx'in ex: ex = self.load_task_json(ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
 
             # Compute the metrics.             
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['high_pddl']])
-            m['action_high_f1'].append(compute_f1(label.lower(), preds[i]['action_high'].lower()))
-            m['action_high_em'].append(compute_exact(label.lower(), preds[i]['action_high'].lower()))
+            m['action_high_f1'].append(compute_f1(label.lower(), preds[key]['action_high'].lower()))
+            m['action_high_em'].append(compute_exact(label.lower(), preds[key]['action_high'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}

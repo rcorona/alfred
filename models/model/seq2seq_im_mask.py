@@ -10,6 +10,10 @@ from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
+import tqdm
+
+from models.model.base import embed_packed_sequence, move_dict_to_cuda
+
 
 class Module(Base):
 
@@ -41,9 +45,7 @@ class Module(Base):
         self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
         self.input_dropout = nn.Dropout(args.input_dropout)
 
-        # internal states
-        self.state_t = None
-        self.e_t = None
+        # TODO: this is only used by leaderboard
         self.test_mode = False
 
         # bce reconstruction loss
@@ -78,25 +80,10 @@ class Module(Base):
         return feat
 
     def forward(self, feat, max_decode=300):
-        # Finish vectorizing language. 
-        pad_seq, seq_lengths = feat['lang_goal_instr']
-        
-        if self.args.gpu: 
-            pad_seq = pad_seq.cuda()
-        
-        embed_seq = self.emb_word(pad_seq)
-        packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-        feat['lang_goal_instr'] = packed_input
-
-        # Move everything onto gpu if needed.
-        if self.args.gpu: 
-            for k in feat:
-                if hasattr(feat[k], 'cuda'):
-                    feat[k] = feat[k].cuda()
-
-        #pdb.set_trace()
-
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
         cont_lang, enc_lang = self.encode_lang(feat)
+
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
         res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
@@ -108,7 +95,7 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
-        emb_lang_goal_instr = feat['lang_goal_instr']
+        emb_lang_goal_instr = embed_packed_sequence(self.emb_word, feat['lang_goal_instr'])
         self.lang_dropout(emb_lang_goal_instr.data)
         enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
         enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
@@ -182,12 +169,18 @@ class Module(Base):
             words = self.vocab['action_low'].index2word(alow)
 
             # sigmoid preds to binary mask
-            alow_mask = F.sigmoid(alow_mask)
-            p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
+            # alow_mask = F.sigmoid(alow_mask)
+            # p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            pred[ex['task_id']] = {
+            key = (ex['task_id'], ex['repeat_idx'])
+
+            assert key not in pred
+
+            # print(len(p_mask))
+
+            pred[key] = {
                 'action_low': ' '.join(words),
-                'action_low_mask': p_mask,
+                # 'action_low_mask': p_mask,
             }
 
         return pred
@@ -284,10 +277,10 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for ex, feat in data:
-            if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            i = ex['task_id']
+        for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
+            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
+            m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
+            m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}

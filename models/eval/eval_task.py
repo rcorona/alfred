@@ -6,6 +6,8 @@ from datetime import datetime
 from eval import Eval
 from env.thor_env import ThorEnv
 
+from models.model.base import AlfredDataset, move_dict_to_cuda
+
 
 class EvalTask(Eval):
     '''
@@ -27,7 +29,7 @@ class EvalTask(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(task)
+                traj = model.load_task_json(model.args, task)[0]
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))
@@ -51,7 +53,11 @@ class EvalTask(Eval):
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
         # extract language features
-        feat = model.featurize([traj_data], load_mask=False)
+        feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
+        # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
+        feat = AlfredDataset.collate_fn([(None, feat)])[1]
+        if args.gpu:
+            move_dict_to_cuda(feat)
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']

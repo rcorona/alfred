@@ -1,11 +1,15 @@
 import os
+import sys
 import json
 import numpy as np
 from PIL import Image
 from datetime import datetime
-from eval import Eval
+from models.eval.eval import Eval
 from env.thor_env import ThorEnv
 import pdb
+
+from models.model.base import AlfredDataset, move_dict_to_cuda
+
 
 class EvalHierarchical(Eval):
     '''
@@ -55,7 +59,11 @@ class EvalHierarchical(Eval):
         
         # Post process subgoals from names to indexes.
         feat['module_idxs'] = model.vocab['high_level'].word2index(feat['module_idxs'])
-        feat = model.tensorize(feat)
+        
+        # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
+        feat = AlfredDataset.collate_fn([(None, feat)])[1]
+        if args.gpu:
+            move_dict_to_cuda(feat)
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']

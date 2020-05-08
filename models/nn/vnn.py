@@ -335,7 +335,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             else: 
                 controller_mask_in = controller_mask[:,t]
 
-            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, _ = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
+            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)

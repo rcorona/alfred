@@ -17,23 +17,30 @@ from importlib import import_module
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from models.utils.helper_utils import optimizer_to
 
-
-if __name__ == '__main__':
-    # parser
-    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-
-    # settings
-    parser.add_argument('--seed', help='random seed', default=123, type=int)
+def add_data_args(parser):
     parser.add_argument('--data', help='dataset folder', default='data/json_feat_2.1.0')
     parser.add_argument('--splits', help='json file containing train/dev/test splits', default='splits/oct21.json')
     parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
     parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
+    parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
+
+    # debugging
+    parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
+    parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
+
+def make_parser():
+    # parser
+    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
+    add_data_args(parser)
+
+    # settings
+    parser.add_argument('--seed', help='random seed', default=123, type=int)
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
     parser.add_argument('--model', help='model to use', default='seq2seq_im')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--resume', help='load a checkpoint')
-    parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
+    parser.add_argument('--num_workers', type=int, default=8, help='number of threads to use in DataLoaders')
 
     # hyper parameters
     parser.add_argument('--batch', help='batch size', default=8, type=int)
@@ -63,13 +70,14 @@ if __name__ == '__main__':
     parser.add_argument('--dec_teacher_forcing', help='use gpu', action='store_true')
     parser.add_argument('--temp_no_history', help='use gpu', action='store_true')
 
-    # Custom parameters. 
+    # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
 
-    # debugging
-    parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
-    parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
-    
+    return parser
+
+if __name__ == '__main__':
+    parser = make_parser()
+
     # args and init
     args = parser.parse_args()
     args.dout = args.dout.format(**vars(args))
