@@ -1,7 +1,7 @@
 import re
 import string
 import collections
-
+import pdb
 
 def normalize_answer(s):
     """
@@ -32,6 +32,7 @@ def get_tokens(s):
 
 
 def compute_exact(a_gold, a_pred):
+    #pdb.set_trace()
     return int(normalize_answer(a_gold) == normalize_answer(a_pred))
 
 

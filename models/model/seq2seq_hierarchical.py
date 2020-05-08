@@ -329,7 +329,18 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
-        emb_lang_goal_instr = feat['lang_goal_instr']
+
+        # Finish embedding language input. 
+        pad_seq, seq_lengths = feat['lang_goal_instr'] 
+
+        # Put on GPU if needed. 
+        if next(self.parameters()).is_cuda:
+            pad_seq = pad_seq.cuda()
+            seq_lengths = seq_lengths.cuda()
+
+        embed_seq = self.emb_word(pad_seq)
+        emb_lang_goal_instr = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+        
         self.lang_dropout(emb_lang_goal_instr.data)
         enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
         enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)

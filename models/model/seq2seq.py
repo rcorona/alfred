@@ -58,7 +58,7 @@ class AlfredDataset(Dataset):
                 # language embedding and padding
                 seqs = [torch.tensor(vv) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                seq_lengths = np.array(list(map(len, v)))
+                seq_lengths = torch.from_numpy(np.array(list(map(len, v)))).long()
                 feat[k] = (pad_seq, seq_lengths)
                 #embed_seq = self.emb_word(pad_seq)
                 #packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
