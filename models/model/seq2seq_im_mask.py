@@ -10,6 +10,7 @@ from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 import pdb
+import tqdm
 
 from models.model.base import embed_packed_sequence, move_dict_to_cuda
 
@@ -168,16 +169,18 @@ class Module(Base):
             words = self.vocab['action_low'].index2word(alow)
 
             # sigmoid preds to binary mask
-            alow_mask = F.sigmoid(alow_mask)
-            p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
+            # alow_mask = F.sigmoid(alow_mask)
+            # p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
             key = (ex['task_id'], ex['repeat_idx'])
 
             assert key not in pred
 
+            # print(len(p_mask))
+
             pred[key] = {
                 'action_low': ' '.join(words),
-                'action_low_mask': p_mask,
+                # 'action_low_mask': p_mask,
             }
 
         return pred
@@ -274,7 +277,7 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for ex, feat in data:
+        for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])

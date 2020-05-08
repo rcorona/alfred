@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from torch import nn
 from tqdm import trange
+import tqdm
 
 from models.model.base import BaseModule
 
@@ -106,7 +107,7 @@ class Module(BaseModule):
         readable output generator for debugging
         '''
         debug = {}
-        for ex, feat in data:
+        for ex, feat in tqdm.tqdm(data, ncols=80, desc='make_debug'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             this_debug = {

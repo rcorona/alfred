@@ -5,6 +5,7 @@ import pickle
 import pprint
 import random
 import time
+import copy
 from copy import deepcopy
 
 import numpy as np
@@ -38,11 +39,12 @@ def tensorize(vv, name):
         return torch.tensor(vv, dtype=torch.float if ('frames' in name) else torch.long)
 
 class AlfredDataset(Dataset):
-    def __init__(self, args, data, model_class, test_mode):
+    def __init__(self, args, data, model_class, test_mode, featurize=True):
         self.data = data
         self.model_class = model_class
         self.args = args
         self.test_mode = test_mode
+        self.featurize = featurize
 
     def __getitem__(self, idx):
 
@@ -50,7 +52,10 @@ class AlfredDataset(Dataset):
         task = self.model_class.load_task_json(self.args, self.data[idx], None)[0]
 
         # Create dict of features from dict.
-        feat = self.model_class.featurize(task, self.args, self.test_mode)
+        if self.featurize:
+            feat = self.model_class.featurize(task, self.args, self.test_mode)
+        else:
+            feat = None
 
         return (task, feat)
 
@@ -348,10 +353,19 @@ class BaseModule(nn.Module):
             valid_seen = self.load_dataset(valid_seen, args.subgoal, 'val_seen', args.preloaded_dataset)
             valid_unseen = self.load_dataset(valid_unseen, args.subgoal, 'val_unseen', args.preloaded_dataset)
 
+        # subsample the training data for the purposes of evaluation
+        train_subset = copy.copy(train)
+        random_state = random.Random(1)
+        random_state.shuffle(train_subset)
+        train_subset = train_subset[::20]
+
+
         # Put dataset splits into wrapper class for parallelizing data-loading.
         train = AlfredDataset(args, train, self.__class__, False)
         valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
         valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
+
+        train_subset = AlfredDataset(args, train_subset, self.__class__, False, featurize=False)
 
         # this didn't seem to give a speedup
         pin_memory = False
@@ -410,10 +424,10 @@ class BaseModule(nn.Module):
                     # e_time = time.time()
                     # print('Batch time in seconds: {}'.format(e_time - s_time))
 
-            print('\ntrain metrics\n')
+            print('\ntrain subset metrics\n')
             # compute metrics for train
             m_train = {k: sum(v) / len(v) for k, v in m_train.items()}
-            m_train.update(self.compute_metric(p_train, train))
+            m_train.update(self.compute_metric(p_train, train_subset))
             m_train['total_loss'] = sum(total_train_loss) / len(total_train_loss)
             self.summary_writer.add_scalar('train/total_loss', m_train['total_loss'], train_iter)
 
@@ -487,7 +501,7 @@ class BaseModule(nn.Module):
                 'vocab': self.vocab,
             }, fsave)
 
-            # debug action output josn
+            # debug action output json
             fpred = os.path.join(args.dout, 'train.debug.preds.json')
             with open(fpred, 'wt') as f:
                 json.dump(self.make_debug(p_train, train), f, indent=2)

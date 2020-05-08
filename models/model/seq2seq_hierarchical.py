@@ -324,14 +324,15 @@ class Module(Base):
             #words = self.vocab['action_low'].index2word(alow)
 
             # sigmoid preds to binary mask
-            alow_mask = F.sigmoid(alow_mask)
-            p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
+            # alow_mask = F.sigmoid(alow_mask)
+            # p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
             key = (ex['task_id'], ex['repeat_idx'])
 
+            # print(len(p_mask))
             pred[key] = {
                 'action_low': alow,
-                'action_low_mask': p_mask,
+                # 'action_low_mask': p_mask,
                 'controller_attn': controller_attn
             }
 
