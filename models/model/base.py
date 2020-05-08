@@ -365,7 +365,7 @@ class BaseModule(nn.Module):
         valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
         valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
 
-        train_subset = AlfredDataset(args, train_subset, self.__class__, False, featurize=False)
+        train_subset = AlfredDataset(args, train_subset, self.__class__, False)
 
         # this didn't seem to give a speedup
         pin_memory = False

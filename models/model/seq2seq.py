@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from torch import nn
 from tqdm import trange
+import tqdm
 from torch.utils.data import Dataset, DataLoader
 import pdb
 from copy import deepcopy

@@ -528,6 +528,7 @@ class Module(Base):
         '''
         compute f1 and extract match scores for output
         '''
+
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
