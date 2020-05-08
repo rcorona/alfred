@@ -477,7 +477,7 @@ class Module(Base):
 
             pred[ex['task_id']] = {
                 'action_low': alow,
-                'action_low_mask': p_mask,
+                #'action_low_mask': p_mask,
                 'controller_attn': controller_attn
             }
 
