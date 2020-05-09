@@ -103,11 +103,13 @@ class Module(BaseModule):
             # low-level action
             feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
 
-            if len(feat['action_low']) != feat['frames'].size(0):
-                key = ex['task_id'], ex['repeat_idx'], ex['subgoal_idx']
-                print("warning: number of actions {} does not match number of frames {} in instance {}".format(
-                    len(feat['action_low']), feat['frames'].size(0), key
-                ))
+            ## this warning prints for < 10 examples (out of 20K) in the training set,
+            ## and it's due to the segment merging in merge_last_two_low_actions in preprocess.py
+            # if len(feat['action_low']) != feat['frames'].size(0):
+            #     key = ex['task_id'], ex['repeat_idx'], ex['subgoal_idx']
+            #     print("warning: number of actions {} does not match number of frames {} in instance {}".format(
+            #         len(feat['action_low']), feat['frames'].size(0), key
+            #     ))
 
             # low-level valid interact
             feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
