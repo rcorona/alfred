@@ -54,6 +54,11 @@ class AlfredDataset(Dataset):
         """
         valid_idx = set()
 
+        high_indices_with_actions = set()
+        for actions in task_data['num']['action_low']:
+            for action in actions:
+                high_indices_with_actions.add(action['high_idx'])
+
         for subgoal in task_data['plan']['high_pddl']:
 
             curr_subgoal = subgoal['discrete_action']['action']
@@ -61,9 +66,12 @@ class AlfredDataset(Dataset):
             if curr_subgoal == 'NoOp' and not keep_noop:
                 continue
 
+
             # Keep the subgoal we're looking for.
             if subgoal_names is None or curr_subgoal in subgoal_names:
-                valid_idx.add(subgoal['high_idx'])
+                high_idx = subgoal['high_idx']
+                if high_idx in high_indices_with_actions:
+                    valid_idx.add(high_idx)
 
             # TODO: this wasn't being used
             # As well as the final NoOp operation, we will copy this to the end of every subgoal example.
@@ -106,10 +114,9 @@ class AlfredDataset(Dataset):
     @staticmethod
     def filter_subgoal_index(data, subgoal_index, add_stop_in_subtrajectories=True):
         '''
-        Split a loaded json to have examples for sub-trajectories. If subgoal_names is passed, only return sub-trajectories with one of these sub-goals.
-        Returns a list of individual examples for subgoal type followed by the NoOp action.
+        Split a loaded json to only contain the subtrajectory specified by subgoal_index
+        if add_stop_in_subtrajectories, then add a NoOp high-level action, with a <<stop>> low-level action, a copy of the last image, and the <<stop>> instruction
         '''
-        # First get idx of segments where specified subgoal takes place.
 
         # Use for counting dataset examples.
         #self.subgoal_count += len(valid_idx) - 1
@@ -140,6 +147,12 @@ class AlfredDataset(Dataset):
             instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
             if a[0]['high_idx'] == subgoal_index
         ]
+        if add_stop_in_subtrajectories:
+            # pull <<stop>> from the end of the original instruction
+            assert len(data['num']['lang_instr'][-1]) == 1
+            data_cp['num']['lang_instr'].append(
+                data['num']['lang_instr'][-1]
+            )
 
         # Filter low level actions.
         data_cp['plan'] = data_cp['plan'].copy()
@@ -177,17 +190,24 @@ class AlfredDataset(Dataset):
 
         assert(len(data_cp['num']['action_low']) == 1)
 
+        # old non-functional form
         # Extend low-level actions with stop action.
         # data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
+
+        # old form that concatenates stop, rather than adding as a separate subtrajectory
+        # if add_stop_in_subtrajectories:
+        #     data_cp['num']['action_low'] = [
+        #         data_cp['num']['action_low'][0] + [data['num']['action_low'][-1][0]]
+        #     ]
         if add_stop_in_subtrajectories:
-            data_cp['num']['action_low'] = [
-                data_cp['num']['action_low'][0] + [data['num']['action_low'][-1][0]]
-            ]
+            # pull the stop action from the end. the high_idx will stay unchanged, but we're not updating those
+            assert len(data['num']['action_low'][-1]) == 1
+            data_cp['num']['action_low'].append(data['num']['action_low'][-1])
 
         return data_cp
 
     def __init__(self, args, data, model_class, test_mode, featurize=True):
-        self.data = data
+        self._data = data
         self.model_class = model_class
         self.args = args
         self.test_mode = test_mode
@@ -195,7 +215,7 @@ class AlfredDataset(Dataset):
 
     def __getitem__(self, idx):
         # Load task from dataset.
-        task = AlfredDataset.load_task_json_unsplit(self.args, self.data[idx])
+        task = AlfredDataset.load_task_json_unsplit(self.args, self._data[idx])
 
         # Create dict of features from dict.
         if self.featurize:
@@ -206,7 +226,7 @@ class AlfredDataset(Dataset):
         return (task, feat)
 
     def __len__(self):
-        return len(self.data)
+        return len(self._data)
 
     @staticmethod
     def collate_fn(batch):
@@ -277,22 +297,33 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
         """
         super().__init__(args, data, model_class, test_mode, featurize=featurize)
         self.subgoal_names = subgoal_names
-        self.task_and_indices = []
+        self._task_and_indices = []
         self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
 
         for datum in data:
-            task = AlfredDataset.load_task_json_unsplit(self.args, data)
+            task = AlfredDataset.load_task_json_unsplit(self.args, datum)
             subgoal_indices = AlfredDataset.extract_subgoal_indices(
-                datum, subgoal_names=subgoal_names, keep_noop=False
+                task, subgoal_names=subgoal_names, keep_noop=False
             )
             for ix in subgoal_indices:
-                self.task_and_indices.append((task, ix))
+                self._task_and_indices.append((task, ix))
 
     def __getitem__(self, idx):
-        task, subgoal_index = self.task_and_indices[idx]
-        return AlfredDataset.filter_subgoal_index(
+        task, subgoal_index = self._task_and_indices[idx]
+        task = AlfredDataset.filter_subgoal_index(
             task, subgoal_index, add_stop_in_subtrajectories=self.add_stop_in_subtrajectories
         )
+
+        # Create dict of features from dict.
+        if self.featurize:
+            feat = self.model_class.featurize(task, self.args, self.test_mode)
+        else:
+            feat = None
+
+        return (task, feat)
+
+    def __len__(self):
+        return len(self._task_and_indices)
 
 class BaseModule(nn.Module):
     """inheritable by seq2seq and instruction chunker"""
