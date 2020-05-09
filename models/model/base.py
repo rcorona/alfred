@@ -16,11 +16,13 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, PackedSequenc
 from torch.utils.data import Dataset, DataLoader
 from tqdm import trange
 from tensorboardX import SummaryWriter
+import pdb
 
 from collections.abc import MutableMapping
 
 # data utilities
 def embed_packed_sequence(embeddings: nn.Embedding, packed_sequence: PackedSequence):
+    
     return PackedSequence(embeddings(packed_sequence.data),
                           batch_sizes=packed_sequence.batch_sizes,
                           sorted_indices=packed_sequence.sorted_indices,
@@ -87,13 +89,10 @@ class AlfredDataset(Dataset):
                 if pad_seq.dim() == 1:
                     pad_seq = pad_seq.unsqueeze(0)
                 assert pad_seq.dim() == 2
-                seq_lengths = np.array(list(map(len, v)))
                 # pack the sequences for now; we can embed them later
                 # feat[k] = (pad_seq, seq_lengths)
-                #embed_seq = self.emb_word(pad_seq)
-                # packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                packed_input = pack_padded_sequence(pad_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                feat[k] = packed_input
+                feat[k] = pad_seq
+                #feat['{}_seq_lengths'.format(k)] = seq_lengths
             elif k in {'action_low_mask'}:
                 # mask padding
                 seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]

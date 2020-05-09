@@ -55,6 +55,7 @@ def make_parser():
     parser.add_argument('--action_loss_wt', help='weight of action loss', default=1., type=float)
     parser.add_argument('--subgoal_aux_loss_wt', help='weight of subgoal completion predictor', default=0., type=float)
     parser.add_argument('--pm_aux_loss_wt', help='weight of progress monitor', default=0., type=float)
+    parser.add_argument('--lang_model', help='Type of language  modeling to use.', default='default', type=str, choices=['default', 'bert'])
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')
