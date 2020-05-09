@@ -208,13 +208,6 @@ class AlfredDataset(Dataset):
 
         data_cp['subgoal_idx'] = subgoal_index
 
-        # TODO: take these out
-        flat_actions = [a for actions in data_cp['num']['action_low'] for a in actions]
-        if add_stop_in_subtrajectories:
-            assert len(flat_actions) == len(data_cp['plan']['low_actions']) + 1
-        else:
-            assert len(flat_actions) == len(data_cp['plan']['low_actions'])
-
         return data_cp
 
     def __init__(self, args, data, model_class, test_mode, featurize=True):
