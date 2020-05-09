@@ -639,11 +639,17 @@ class BaseModule(nn.Module):
             with open(fpred, 'wt') as f:
                 json.dump(self.make_debug(p_train, train_subset), f, indent=2)
 
+            iters_by_split = {
+                'train': train_iter,
+                'valid_seen': valid_seen_iter,
+                'valid_unseen': valid_unseen_iter,
+            }
+
             # write stats
             for split in stats.keys():
                 if isinstance(stats[split], dict):
                     for k, v in stats[split].items():
-                        self.summary_writer.add_scalar(split + '/' + k, v, train_iter)
+                        self.summary_writer.add_scalar(split + '/' + k, v, iters_by_split[split])
             pprint.pprint(stats)
 
     def run_pred(self, dev_loader, args=None, name='dev', iter=0):
