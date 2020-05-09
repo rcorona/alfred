@@ -95,11 +95,7 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
-        emb_lang_goal_instr = embed_packed_sequence(self.emb_word, feat['lang_goal_instr'])
-        self.lang_dropout(emb_lang_goal_instr.data)
-        enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
-        enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
-        self.lang_dropout(enc_lang_goal_instr)
+        enc_lang_goal_instr = self.encode_lang_base(feat)
         cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
 
         return cont_lang_goal_instr, enc_lang_goal_instr
