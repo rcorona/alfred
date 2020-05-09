@@ -36,6 +36,8 @@ class Module(Base):
         'NoOp'
     ]
 
+    noop_index = submodule_names.index('NoOp')
+
     def __init__(self, args, vocab):
         '''
         Seq2Seq agent
@@ -45,7 +47,7 @@ class Module(Base):
         self.args = args
 
         # TODO remove hardcoding and base on list of module names or something. 
-        n_modules = 8
+        # n_modules = 8
 
         # Add high level vocab.
         self.vocab['high_level'] = Vocab()
@@ -132,6 +134,9 @@ class Module(Base):
             # Ground truth high-idx. 
             high_idxs = [a['high_idx'] for a in ex['num']['action_low']]
             module_names = [ex['plan']['high_pddl'][idx]['discrete_action']['action'] for idx in high_idxs]
+            for i, name in enumerate(module_names):
+                if name == 'NoOp':
+                    assert i == len(module_names) - 1, 'NoOp found before end of the high level sequence'
             module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for.
             module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
@@ -154,7 +159,7 @@ class Module(Base):
             feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
 
             # Add High-level STOP action to high-level controller.
-            feat['module_idxs'][-1] = 8
+            feat['module_idxs'][-1] = cls.noop_index
 
             # Attention masks for high level controller.
             attn_mask = np.zeros((len(feat['module_idxs']), 9))
@@ -235,7 +240,8 @@ class Module(Base):
         mask = np.expand_dims(mask, axis=0)
         return mask
 
-    def tensorize_lang(self, feat): 
+    def tensorize_lang(self, feat):
+        # TODO: this is no longer used, was moved to AlfredDataset
 
         # Finish vectorizing language. 
         pad_seq, seq_lengths = feat['lang_goal_instr']
@@ -344,7 +350,7 @@ class Module(Base):
         max_action_low = out_action_low.max(1)[1]
 
         # If current subgoal predicted stop, then change subgoal module.
-        if max_action_low == 2:
+        if max_action_low == self.stop_token:
             self.r_state['subgoal'] = None
 
         # Select next subgoal module to pay attention to.
@@ -395,8 +401,8 @@ class Module(Base):
             if clean_special_tokens:
 
                 # Stop each trajectory after high-level controller stops.
-                if 8 in controller_attn:
-                    stop_start_idx = controller_attn.index(8)
+                if self.noop_index in controller_attn:
+                    stop_start_idx = controller_attn.index(self.noop_index)
                     alow = alow[:stop_start_idx]
                     controller_attn = controller_attn[:stop_start_idx]
                     alow_mask = alow_mask[:stop_start_idx]
@@ -531,7 +537,6 @@ class Module(Base):
 
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
-            # if 'repeat_idx' in ex: ex = self.load_task_json(self.args, ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             # feat should already contain the following, since all AlfredDataset s which are fed into this function have test_mode=False
             # feat = self.featurize(ex, self.args, False, load_mask=True, load_frames=True)
@@ -551,7 +556,7 @@ class Module(Base):
 
             # Evaluate high-level controller.
             # Get indexes of predicted transitions.
-            stop_idxs = np.argwhere(np.array(preds[key]['action_low'])[:-1] == 2).flatten()
+            stop_idxs = np.argwhere(np.array(preds[key]['action_low'])[:-1] == self.stop_token).flatten()
             high_idxs = np.append([0], stop_idxs + 1).astype(np.int32)
 
             # Get predicted submodule transitions

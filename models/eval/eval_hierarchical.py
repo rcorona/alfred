@@ -31,7 +31,7 @@ class EvalHierarchical(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(model.args, task)[0]
+                traj = AlfredDataset.load_task_json(model.args, task)[0]
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))

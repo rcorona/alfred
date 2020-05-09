@@ -8,6 +8,8 @@ import time
 import copy
 from copy import deepcopy
 
+from typing import Set
+
 import numpy as np
 import torch
 import tqdm
@@ -20,6 +22,9 @@ from tensorboardX import SummaryWriter
 from collections.abc import MutableMapping
 
 # data utilities
+from models.utils.helper_utils import safe_zip
+
+
 def embed_packed_sequence(embeddings: nn.Embedding, packed_sequence: PackedSequence):
     return PackedSequence(embeddings(packed_sequence.data),
                           batch_sizes=packed_sequence.batch_sizes,
@@ -39,6 +44,148 @@ def tensorize(vv, name):
         return torch.tensor(vv, dtype=torch.float if ('frames' in name) else torch.long)
 
 class AlfredDataset(Dataset):
+    @staticmethod
+    def extract_subgoal_indices(task_data, subgoal_names: Set[str]=None, keep_noop=False):
+        """
+        :param data:
+        :param subgoal_names: if None, return all subgoals
+        :param keep_noop:
+        :return:
+        """
+        valid_idx = set()
+
+        for subgoal in task_data['plan']['high_pddl']:
+
+            curr_subgoal = subgoal['discrete_action']['action']
+
+            if curr_subgoal == 'NoOp' and not keep_noop:
+                continue
+
+            # Keep the subgoal we're looking for.
+            if subgoal_names is None or curr_subgoal in subgoal_names:
+                valid_idx.add(subgoal['high_idx'])
+
+            # TODO: this wasn't being used
+            # As well as the final NoOp operation, we will copy this to the end of every subgoal example.
+            # elif curr_subgoal == 'NoOp':
+            #     noop_idx = subgoal['high_idx']
+        return valid_idx
+
+    @staticmethod
+    def load_task_json_unsplit(args, task):
+        # TODO: unuglify this
+        json_path = os.path.join(args.data, task['task'], '%s' % args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        with open(json_path) as f:
+            data = json.load(f)
+
+        data['repeat_idx'] = task['repeat_idx']
+        return data
+
+    @staticmethod
+    def load_task_json(args, task, subgoal=None, split_into_subtrajectories=False, add_stop_in_subtrajectories=True):
+        '''
+        load preprocessed json from disk
+        '''
+        data = AlfredDataset.load_task_json_unsplit(args, task)
+
+        if subgoal is not None or split_into_subtrajectories:
+            if subgoal is not None:
+                subgoals_to_keep = {subgoal}
+            else:
+                subgoals_to_keep = None # means keep all
+            # Will return list of subgoal datapoints.
+            subgoal_indices = AlfredDataset.extract_subgoal_indices(data, subgoals_to_keep)
+            return [
+                AlfredDataset.filter_subgoal_index(data, subgoal_ix, add_stop_in_subtrajectories)
+                for subgoal_ix in sorted(subgoal_indices)
+            ]
+
+        # Otherwise return list with singleton item.
+        return [data]
+
+    @staticmethod
+    def filter_subgoal_index(data, subgoal_index, add_stop_in_subtrajectories=True):
+        '''
+        Split a loaded json to have examples for sub-trajectories. If subgoal_names is passed, only return sub-trajectories with one of these sub-goals.
+        Returns a list of individual examples for subgoal type followed by the NoOp action.
+        '''
+        # First get idx of segments where specified subgoal takes place.
+
+        # Use for counting dataset examples.
+        #self.subgoal_count += len(valid_idx) - 1
+        #self.trajectories_count += 1
+        #for subgoal in data['plan']['high_pddl']: self.subgoal_set.add(subgoal['discrete_action']['action'])
+        #return
+
+        # Create an example from each instance of the subgoal.
+        examples = []
+
+        # this fails on the training data
+        # for ix, act_low in enumerate(data['num']['action_low']):
+        #     for act in act_low:
+        #         assert act['high_idx'] == ix
+
+        # this is true for <10 trials in the training data
+        # if len(data['plan']['high_pddl']) != len(data['num']['lang_instr']):
+        #     print("number of language instructions doesn't match number of high indices in {}: {} != {}".format(
+        #         data['task_id'], len(data['num']['lang_instr']), len(data['plan']['high_pddl'])))
+
+        # Copy data to make individual example.
+        # data_cp = deepcopy(data)
+        data_cp = data.copy()
+
+        # Filter language instructions.
+        data_cp['num'] = data_cp['num'].copy()
+        data_cp['num']['lang_instr'] = [
+            instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
+            if a[0]['high_idx'] == subgoal_index
+        ]
+
+        # Filter low level actions.
+        data_cp['plan'] = data_cp['plan'].copy()
+        data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == subgoal_index]
+
+        # Filter images.
+        data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == subgoal_index]
+
+        # Fix image idx.
+        low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
+        new_images = []
+        for img in data_cp['images']:
+            img = img.copy()
+            img['low_idx'] = low_idxs.index(img['low_idx'])
+            new_images.append(img)
+        if add_stop_in_subtrajectories:
+            new_images.append(img)
+        data_cp['images'] = new_images
+
+        # TODO: handle ['num']['low_to_high_idx'], for progress monitors
+
+        # Filter action-low.
+        # for i in range(len(data_cp['num']['action_low'])):
+        #     data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
+        data_cp['num']['action_low'] = [
+            [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == subgoal_index]
+            for i in range(len(data_cp['num']['action_low']))
+        ]
+        data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
+
+        # assert len(data_cp['num']['action_low']) <= 1
+
+        # if not len(data_cp['num']['action_low']) == 1:
+        #     continue
+
+        assert(len(data_cp['num']['action_low']) == 1)
+
+        # Extend low-level actions with stop action.
+        # data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
+        if add_stop_in_subtrajectories:
+            data_cp['num']['action_low'] = [
+                data_cp['num']['action_low'][0] + [data['num']['action_low'][-1][0]]
+            ]
+
+        return data_cp
+
     def __init__(self, args, data, model_class, test_mode, featurize=True):
         self.data = data
         self.model_class = model_class
@@ -47,9 +194,8 @@ class AlfredDataset(Dataset):
         self.featurize = featurize
 
     def __getitem__(self, idx):
-
         # Load task from dataset.
-        task = self.model_class.load_task_json(self.args, self.data[idx], None)[0]
+        task = AlfredDataset.load_task_json_unsplit(self.args, self.data[idx])
 
         # Create dict of features from dict.
         if self.featurize:
@@ -119,6 +265,35 @@ class AlfredDataset(Dataset):
 
         return (batch, feat)
 
+class AlfredSubtrajectoryDataset(AlfredDataset):
+    def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None, add_stop_in_subtrajectories=True):
+        """
+        :param args:
+        :param data:
+        :param model_class:
+        :param test_mode:
+        :param featurize:
+        :param subgoals:  if None, load all sub-trajectory types. otherwise, a set of sub-trajectories to filter to
+        """
+        super().__init__(args, data, model_class, test_mode, featurize=featurize)
+        self.subgoal_names = subgoal_names
+        self.task_and_indices = []
+        self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
+
+        for datum in data:
+            task = AlfredDataset.load_task_json_unsplit(self.args, data)
+            subgoal_indices = AlfredDataset.extract_subgoal_indices(
+                datum, subgoal_names=subgoal_names, keep_noop=False
+            )
+            for ix in subgoal_indices:
+                self.task_and_indices.append((task, ix))
+
+    def __getitem__(self, idx):
+        task, subgoal_index = self.task_and_indices[idx]
+        return AlfredDataset.filter_subgoal_index(
+            task, subgoal_index, add_stop_in_subtrajectories=self.add_stop_in_subtrajectories
+        )
+
 class BaseModule(nn.Module):
     """inheritable by seq2seq and instruction chunker"""
     @classmethod
@@ -132,98 +307,6 @@ class BaseModule(nn.Module):
             feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
         if not test_mode:
             feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-
-    @classmethod
-    def filter_subgoal(self, data, subgoal_name):
-        '''
-        Filter a loaded json to only include examples from a specific type of subgoal.
-        Returns a list of individual examples for subgoal type followed by the NoOp action.
-        '''
-        # First get idx of segments where specified subgoal takes place.
-        valid_idx = set()
-
-        for subgoal in data['plan']['high_pddl']:
-
-            curr_subgoal = subgoal['discrete_action']['action']
-
-            # Keep the subgoal we're looking for.
-            if curr_subgoal == subgoal_name:
-                valid_idx.add(subgoal['high_idx'])
-
-            # As well as the final NoOp operation, we will copy this to the end of every subgoal example.
-            elif curr_subgoal == 'NoOp':
-                noop_idx = subgoal['high_idx']
-
-        # No examples will be added from this file to dataset.
-        if len(valid_idx) == 0:
-            return []
-
-        # Use for counting dataset examples.
-        #self.subgoal_count += len(valid_idx) - 1
-        #self.trajectories_count += 1
-        #for subgoal in data['plan']['high_pddl']: self.subgoal_set.add(subgoal['discrete_action']['action'])
-        #return
-
-        # Create an example from each instance of the subgoal.
-        examples = []
-
-        for idx in valid_idx:
-
-            # Copy data to make individual example.
-            data_cp = deepcopy(data)
-
-            # Filter language instructions.
-            data_cp['num']['lang_instr'] = [data_cp['num']['lang_instr'][idx]]
-
-            # Filter low level actions.
-            data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == idx]
-
-            # Filter images.
-            data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == idx]
-
-            # Fix image idx.
-            low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
-
-            for img in data_cp['images']:
-                img['low_idx'] = low_idxs.index(img['low_idx'])
-
-            # Filter action-low.
-            for i in range(len(data_cp['num']['action_low'])):
-                data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
-
-            data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
-
-            # Extend low-level actions with stop action.
-            if not len(data_cp['num']['action_low']) == 1:
-                continue
-
-            assert(len(data_cp['num']['action_low']) == 1)
-
-            data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
-
-            examples.append(data_cp)
-
-        return examples
-
-
-    @classmethod
-    def load_task_json(cls, args, task, subgoal=None):
-        '''
-        load preprocessed json from disk
-        '''
-        json_path = os.path.join(args.data, task['task'], '%s' % args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
-        with open(json_path) as f:
-            data = json.load(f)
-
-        data['repeat_idx'] = task['repeat_idx']
-
-        if subgoal is not None:
-
-            # Will return list of subgoal datapoints.
-            return cls.filter_subgoal(data, subgoal)
-
-        # Otherwise return list with singleton item.
-        return [data]
 
     @classmethod
     def get_task_root(cls, ex, args):
@@ -502,9 +585,9 @@ class BaseModule(nn.Module):
             }, fsave)
 
             # debug action output json
-            fpred = os.path.join(args.dout, 'train.debug.preds.json')
+            fpred = os.path.join(args.dout, 'train_subset.debug.preds.json')
             with open(fpred, 'wt') as f:
-                json.dump(self.make_debug(p_train, train), f, indent=2)
+                json.dump(self.make_debug(p_train, train_subset), f, indent=2)
 
             # write stats
             for split in stats.keys():

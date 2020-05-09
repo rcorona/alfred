@@ -12,69 +12,6 @@ import time
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from models.model.base import BaseModule
 
-class AlfredDataset(Dataset): 
-
-    def __init__(self, args, data, model_class, test_mode): 
-        self.data = data
-        self.model_class = model_class
-        self.args = args
-        self.test_mode = test_mode
-
-    def __getitem__(self, idx): 
-
-        # Load task from dataset. 
-        task = self.model_class.load_task_json(self.args, self.data[idx], None)[0] 
-
-        # Create dict of features from dict. 
-        feat = self.model_class.featurize(task, self.args, self.test_mode)
-
-        return (task, feat)
-
-    def __len__(self): 
-        return len(self.data)
-
-    def collate_fn(batch): 
-      
-        tasks = [e[0] for e in batch]
-        feats = [e[1] for e in batch]
-        batch = tasks # Stick to naming convention. 
-
-        pad = 0
-
-        # Will hold vectorized features. 
-        feat = {}
-
-        # Make batch out feature dicts.
-        for k in feats[0].keys(): 
-            feat[k] = [element[k] for element in feats]
-
-        # tensorization and padding
-        for k, v in feat.items():
-            if k in {'lang_goal_instr'}:
-                # language embedding and padding
-                seqs = [torch.tensor(vv) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                seq_lengths = torch.from_numpy(np.array(list(map(len, v)))).long()
-                feat[k] = (pad_seq, seq_lengths)
-                #embed_seq = self.emb_word(pad_seq)
-                #packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                #feat[k] = packed_input
-            elif k in {'action_low_mask'}:
-                # mask padding
-                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
-                feat[k] = seqs
-            elif k in {'subgoal_progress', 'subgoals_completed'}:
-                # auxillary padding
-                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                feat[k] = pad_seq
-            
-            else:
-                # default: tensorize and pad sequence
-                seqs = [torch.tensor(vv, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                feat[k] = pad_seq
-
 class Module(BaseModule):
 
     # static sentinel tokens
@@ -153,6 +90,7 @@ class Module(BaseModule):
                 # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
                 if keep[d['low_idx']] is None:
                     keep[d['low_idx']] = im[i]
+            assert all(x is not None for x in keep)
             keep.append(keep[-1])  # stop frame
             feat['frames'] = torch.stack(keep, dim=0)
 
@@ -164,6 +102,8 @@ class Module(BaseModule):
         if not test_mode:
             # low-level action
             feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
+
+            assert len(feat['action_low']) == feat['frames'].size(0)
 
             # low-level valid interact
             feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])

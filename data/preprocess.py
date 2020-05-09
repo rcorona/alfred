@@ -104,7 +104,6 @@ class Dataset(object):
         traj['num']['lang_goal'] = self.numericalize(self.vocab['word'], traj['ann']['goal'], train=True)
         traj['num']['lang_instr'] = [self.numericalize(self.vocab['word'], x, train=True) for x in traj['ann']['instr']]
 
-
     def process_actions(self, ex, traj):
         # deal with missing end high-level action
         self.fix_missing_high_pddl_end_action(ex)

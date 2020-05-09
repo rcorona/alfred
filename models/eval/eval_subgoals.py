@@ -43,10 +43,11 @@ class EvalSubgoals(Eval):
             task = task_queue.get()
 
             try:
-                traj = model.load_task_json(model.args, task)[0]
+                traj = AlfredDataset.load_task_json(model.args, task)[0]
                 if args.modular_subgoals:
                     filtered_traj_by_subgoal = {
-                        subgoal: model.load_task_json(task, subgoal)
+                        # TODO: check that this expects a list
+                        subgoal: AlfredDataset.load_task_json(model.args, task, subgoal)
                         for subgoal in subgoals_to_evaluate
                     }
                 else:

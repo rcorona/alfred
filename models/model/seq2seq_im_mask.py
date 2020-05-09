@@ -1,4 +1,5 @@
 import os
+
 import torch
 import numpy as np
 import nn.vnn as vnn
@@ -278,7 +279,6 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
-            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))

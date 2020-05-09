@@ -188,7 +188,6 @@ class Chunker(BaseModule):
     def compute_metric(self, preds, data):
         m = collections.defaultdict(list)
         for ex, feat in data:
-            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
             key = (ex['task_id'], ex['repeat_idx'])
             gold_tags = feat['chunk_tags']
             pred_tags = preds[key]['chunk_tags']

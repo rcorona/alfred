@@ -34,3 +34,9 @@ def load_partial_model(pretrained_dict, model):
     pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
     model_dict.update(pretrained_dict)
     model.load_state_dict(model_dict)
+
+
+def safe_zip(*seqs):
+    for x in seqs[1:]:
+        assert len(x) == len(seqs[0])
+    return zip(*seqs)
