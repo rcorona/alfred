@@ -39,6 +39,8 @@ def make_parser():
     parser.add_argument('--lr', help='optimizer learning rate', default=1e-4, type=float)
     parser.add_argument('--decay_epoch', help='num epoch to adjust learning rate', default=10, type=int)
 
+    parser.add_argument('--print_git', action='store_true')
+
     return parser
 
 def main():
@@ -48,6 +50,9 @@ def main():
     args = parser.parse_args()
     args.dout = args.dout.format(**vars(args))
     torch.manual_seed(args.seed)
+
+    if args.print_git:
+        print_git_info()
 
     # check if dataset has been preprocessed
     if not os.path.exists(os.path.join(args.data, "%s.vocab" % args.pp_folder)) and not args.preprocess:

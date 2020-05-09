@@ -117,7 +117,7 @@ class Module(BaseModule):
         debug = {}
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='make_debug'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             this_debug = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],

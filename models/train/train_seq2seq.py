@@ -15,7 +15,8 @@ import json
 from data.preprocess import Dataset
 from importlib import import_module
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from models.utils.helper_utils import optimizer_to
+from models.utils.helper_utils import optimizer_to, print_git_info
+
 
 def add_data_args(parser):
     parser.add_argument('--data', help='dataset folder', default='data/json_feat_2.1.0')
@@ -23,6 +24,8 @@ def add_data_args(parser):
     parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
     parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
     parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
+
+    parser.add_argument('--train_on_subtrajectories', action='store_true', help='chop up full trajectories and instructions into subtrajectories')
 
     # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
@@ -73,6 +76,8 @@ def make_parser():
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
 
+    parser.add_argument('--print_git', action='store_true')
+
     return parser
 
 if __name__ == '__main__':
@@ -82,6 +87,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args.dout = args.dout.format(**vars(args))
     torch.manual_seed(args.seed)
+
+    if args.print_git:
+        print_git_info()
 
     # check if dataset has been preprocessed
     if not os.path.exists(os.path.join(args.data, "%s.vocab" % args.pp_folder)) and not args.preprocess:

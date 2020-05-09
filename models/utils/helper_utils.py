@@ -1,4 +1,5 @@
 import torch
+import subprocess
 
 def delete_keys_from_dict(dict_del, lst_keys):
     """
@@ -40,3 +41,8 @@ def safe_zip(*seqs):
     for x in seqs[1:]:
         assert len(x) == len(seqs[0])
     return zip(*seqs)
+
+def print_git_info():
+    # print the git revision and any changes, to make self-replication easier!
+    subprocess.call("git rev-parse HEAD", shell=True)
+    subprocess.call("git --no-pager diff", shell=True)

@@ -87,6 +87,8 @@ class AlfredDataset(Dataset):
             data = json.load(f)
 
         data['repeat_idx'] = task['repeat_idx']
+        # None means this contains all subgoals; will be set in copies if filter_subgoal_index is called
+        data['subgoal_idx'] = None
         return data
 
     @staticmethod
@@ -204,6 +206,8 @@ class AlfredDataset(Dataset):
             assert len(data['num']['action_low'][-1]) == 1
             data_cp['num']['action_low'].append(data['num']['action_low'][-1])
 
+        data_cp['subgoal_idx'] = subgoal_index
+
         return data_cp
 
     def __init__(self, args, data, model_class, test_mode, featurize=True):
@@ -300,7 +304,12 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
         self._task_and_indices = []
         self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
 
-        for datum in data:
+        if len(data) > 1000:
+            iter = tqdm.tqdm(data, ncols=80, desc='dataset: getting subgoals')
+        else:
+            iter = data
+
+        for datum in iter:
             task = AlfredDataset.load_task_json_unsplit(self.args, datum)
             subgoal_indices = AlfredDataset.extract_subgoal_indices(
                 task, subgoal_names=subgoal_names, keep_noop=False
@@ -389,6 +398,11 @@ class BaseModule(nn.Module):
         #self.trajectories_count = 0
         #self.subgoal_set = set()
 
+    def get_instance_key(self, instance):
+        # return a unique identifier for the instance in the dataset
+        # TODO: move this to AlfredDataset / AlfredSubtrajectoryDataset
+        return instance['task_id'], instance['repeat_idx'], instance['subgoal_idx']
+
     def forward(self, feat, max_decode=100):
         raise NotImplementedError()
 
@@ -473,13 +487,18 @@ class BaseModule(nn.Module):
         random_state.shuffle(train_subset)
         train_subset = train_subset[::20]
 
+        # this isn't implemented for instruction_chunker
+        if hasattr(args, 'train_on_subtrajectories') and args.train_on_subtrajectories:
+            dataset_class = AlfredSubtrajectoryDataset
+        else:
+            dataset_class = AlfredDataset
 
         # Put dataset splits into wrapper class for parallelizing data-loading.
-        train = AlfredDataset(args, train, self.__class__, False)
-        valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
-        valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
+        train = dataset_class(args, train, self.__class__, False)
+        valid_seen = dataset_class(args, valid_seen, self.__class__, False)
+        valid_unseen = dataset_class(args, valid_unseen, self.__class__, False)
 
-        train_subset = AlfredDataset(args, train_subset, self.__class__, False)
+        train_subset = dataset_class(args, train_subset, self.__class__, False)
 
         # this didn't seem to give a speedup
         pin_memory = False

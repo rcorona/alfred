@@ -422,7 +422,7 @@ class Module(Base):
             # alow_mask = F.sigmoid(alow_mask)
             # p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
 
             # print(len(p_mask))
             pred[key] = {
@@ -537,7 +537,7 @@ class Module(Base):
 
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             # feat should already contain the following, since all AlfredDataset s which are fed into this function have test_mode=False
             # feat = self.featurize(ex, self.args, False, load_mask=True, load_frames=True)
 

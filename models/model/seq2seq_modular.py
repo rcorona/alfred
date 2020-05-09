@@ -301,7 +301,7 @@ class Module(Base):
             alow_mask = F.sigmoid(alow_mask)
             p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             pred[key] = {
                 'action_low': ' '.join(words),
                 'action_low_mask': p_mask,
@@ -406,7 +406,7 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
             m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))

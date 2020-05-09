@@ -258,7 +258,7 @@ class Module(Base):
         '''
         debug = {}
         for ex in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             debug[key] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
@@ -318,7 +318,7 @@ class Module(Base):
         m = collections.defaultdict(list)
         for ex in data:
             # Load task.
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
 
             # Compute the metrics.             
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['high_pddl']])
