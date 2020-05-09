@@ -51,6 +51,8 @@ def main():
     args.dout = args.dout.format(**vars(args))
     torch.manual_seed(args.seed)
 
+    print(' '.join(sys.argv[1:]))
+
     if args.print_git:
         print_git_info()
 
