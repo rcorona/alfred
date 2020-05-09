@@ -15,7 +15,7 @@ import json
 from data.preprocess import Dataset
 from importlib import import_module
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from models.utils.helper_utils import optimizer_to
+from models.utils.helper_utils import optimizer_to, print_git_info
 
 from models.train.train_seq2seq import  add_data_args
 
