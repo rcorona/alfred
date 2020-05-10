@@ -7,6 +7,7 @@ import random
 import time
 import copy
 from copy import deepcopy
+import math
 
 from typing import Set
 
@@ -16,8 +17,11 @@ import tqdm
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, PackedSequence
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.optimizer import Optimizer
 from tqdm import trange
 from tensorboardX import SummaryWriter
+import pdb
+from pytorch_transformers import WarmupConstantSchedule
 
 from collections.abc import MutableMapping
 
@@ -26,6 +30,7 @@ from models.utils.helper_utils import safe_zip
 
 
 def embed_packed_sequence(embeddings: nn.Embedding, packed_sequence: PackedSequence):
+    
     return PackedSequence(embeddings(packed_sequence.data),
                           batch_sizes=packed_sequence.batch_sizes,
                           sorted_indices=packed_sequence.sorted_indices,
@@ -42,6 +47,116 @@ def tensorize(vv, name):
         return vv
     else:
         return torch.tensor(vv, dtype=torch.float if ('frames' in name) else torch.long)
+
+class AdamW(Optimizer):
+    r"""Implements AdamW algorithm.
+
+    The original Adam algorithm was proposed in `Adam: A Method for Stochastic Optimization`_.
+    The AdamW variant was proposed in `Decoupled Weight Decay Regularization`_.
+
+    Arguments:
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        lr (float, optional): learning rate (default: 1e-3)
+        betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square (default: (0.9, 0.999))
+        eps (float, optional): term added to the denominator to improve
+            numerical stability (default: 1e-8)
+        weight_decay (float, optional): weight decay coefficient (default: 1e-2)
+        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
+            algorithm from the paper `On the Convergence of Adam and Beyond`_
+            (default: False)
+
+    .. _Adam\: A Method for Stochastic Optimization:
+        https://arxiv.org/abs/1412.6980
+    .. _Decoupled Weight Decay Regularization:
+        https://arxiv.org/abs/1711.05101
+    .. _On the Convergence of Adam and Beyond:
+        https://openreview.net/forum?id=ryQu7f-RZ
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-2, amsgrad=False):
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, amsgrad=amsgrad)
+        super(AdamW, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(AdamW, self).__setstate__(state)
+        for group in self.param_groups:
+            group.setdefault('amsgrad', False)
+
+    def step(self, closure=None):
+        """Performs a single optimization step.
+
+        Arguments:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                # Perform stepweight decay
+                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+
+                # Perform optimization step
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
+                amsgrad = group['amsgrad']
+
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    # Exponential moving average of squared gradient values
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+                    if amsgrad:
+                        # Maintains max of all exp. moving avg. of sq. grad. values
+                        state['max_exp_avg_sq'] = torch.zeros_like(p.data)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                if amsgrad:
+                    max_exp_avg_sq = state['max_exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                state['step'] += 1
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                # Decay the first and second moment running average coefficient
+                exp_avg.mul_(beta1).add_(1 - beta1, grad)
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                if amsgrad:
+                    # Maintains the maximum of all 2nd moment running avg. till now
+                    torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
+                    # Use the max. for normalizing running avg. of gradient
+                    denom = (max_exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
+                else:
+                    denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
+
+                step_size = group['lr'] / bias_correction1
+
+                p.data.addcdiv_(-step_size, exp_avg, denom)
+
+        return loss
 
 class AlfredDataset(Dataset):
     @staticmethod
@@ -257,13 +372,10 @@ class AlfredDataset(Dataset):
                 if pad_seq.dim() == 1:
                     pad_seq = pad_seq.unsqueeze(0)
                 assert pad_seq.dim() == 2
-                seq_lengths = np.array(list(map(len, v)))
                 # pack the sequences for now; we can embed them later
                 # feat[k] = (pad_seq, seq_lengths)
-                #embed_seq = self.emb_word(pad_seq)
-                # packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                packed_input = pack_padded_sequence(pad_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                feat[k] = packed_input
+                feat[k] = pad_seq
+                #feat['{}_seq_lengths'.format(k)] = seq_lengths
             elif k in {'action_low_mask'}:
                 # mask padding
                 seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
@@ -517,7 +629,27 @@ class BaseModule(nn.Module):
             json.dump(vars(args), f, indent=2)
 
         # optimizer
-        optimizer = optimizer or torch.optim.Adam(self.parameters(), lr=args.lr)
+        if args.lang_model == 'bert':
+            self.emb_word.requires_grad = False
+            self.lang_projection.requires_grad = False
+
+            regular_optim_params = [p for p in self.parameters() if p.requires_grad]
+
+            # Set up optimizer for bert. 
+            self.emb_word.requires_grad = True
+            self.lang_projection.requires_grad = True
+            bert_params = [p for p in self.emb_word.parameters()] + [p for p in self.lang_projection.parameters()]
+
+            bert_optim = AdamW(bert_params, lr=5e-5, weight_decay=0.01)
+
+            # Scheduler for warming up bert fine-tuning. 
+            warmup_steps = int((args.epoch * (len(train) / args.batch)) * 0.1)
+            bert_scheduler = WarmupConstantSchedule(bert_optim, warmup_steps=warmup_steps)
+        
+        else: 
+            regular_optim_params = self.parameters()
+
+        optimizer = optimizer or torch.optim.Adam(regular_optim_params, lr=args.lr)
 
         # display dout
         print("Saving to: %s" % self.args.dout)
@@ -543,11 +675,20 @@ class BaseModule(nn.Module):
                         m_train[ln].append(v.item())
                         self.summary_writer.add_scalar('train/' + ln, v.item(), train_iter)
 
-                    # optimizer backward pass
-                    optimizer.zero_grad()
+                    # optimizer backward pass, also optimize bert params if needed. 
+                    optimizer.zero_grad()                    
+                    if args.lang_model == 'bert': 
+                        bert_optim.zero_grad()
+                    
                     sum_loss = sum(loss.values())
                     sum_loss.backward()
+
                     optimizer.step()
+                    if args.lang_model == 'bert': 
+                        bert_optim.step()
+                        bert_scheduler.step()
+    
+                    print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
 
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()
@@ -556,6 +697,10 @@ class BaseModule(nn.Module):
 
                     # e_time = time.time()
                     # print('Batch time in seconds: {}'.format(e_time - s_time))
+
+            # Scheduler step for bert warmup if needed. 
+            if args.lang_model == 'bert':
+                pass#bert_scheduler.step()
 
             print('\ntrain subset metrics\n')
             # compute metrics for train

@@ -10,7 +10,8 @@ from copy import deepcopy
 import pickle
 import time
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
-from models.model.base import BaseModule
+from models.model.base import BaseModule, embed_packed_sequence
+from transformers import BertModel, BertTokenizer
 
 class Module(BaseModule):
 
@@ -31,8 +32,18 @@ class Module(BaseModule):
 
         self.vocab = vocab
 
-        # emb modules
-        self.emb_word = nn.Embedding(len(vocab['word']), args.demb)
+        # Word embeddings. 
+        if args.lang_model == 'default': 
+            self.emb_word = nn.Embedding(len(vocab['word']), args.demb)
+        
+        elif args.lang_model == 'bert': 
+            
+            # Load BERT tokenizer and model. 
+            self.__class__.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            self.emb_word = BertModel.from_pretrained('bert-base-uncased')
+            self.lang_projection = nn.Sequential(nn.Linear(768, args.dhid * 2), nn.ReLU())
+
+        # Low-level actions.  
         self.emb_action_low = nn.Embedding(len(vocab['action_low']), args.demb)
 
         # end tokens
@@ -41,6 +52,55 @@ class Module(BaseModule):
 
     def forward(self, feat, max_decode=100):
         raise NotImplementedError()
+
+    @classmethod
+    def post_process_lang(cls, ex, args): 
+        
+        # Default partitioning. 
+        if args.lang_model == 'default':
+            goal, instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+
+        elif args.lang_model == 'bert': 
+
+            # Get strings for goal and low-level instruction. 
+            goal = ''.join(['[SEP]'] + ex['ann']['goal'][:-1] + ['[SEP]'])
+            instr = ''.join(['[CLS]'] + [word for desc in ex['ann']['instr'] for word in desc])
+
+            # Run them through tokenizer and concatenate. 
+            goal = cls.tokenizer.encode(goal)
+            instr = cls.tokenizer.encode(instr)
+
+        return goal, instr
+
+    def encode_lang_base(self, feat): 
+
+        lang_goal_instr = feat['lang_goal_instr'].long()
+        seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
+
+        # Place on GPU if needed. 
+        if self.args.gpu: 
+            lang_goal_instr = lang_goal_instr.cuda()
+            seq_lengths = seq_lengths.cuda()
+
+        if self.args.lang_model == 'default': 
+            embed_seq = self.emb_word(lang_goal_instr)
+            emb_lang_goal_instr = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+            self.lang_dropout(emb_lang_goal_instr.data)
+            enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
+            enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
+
+        elif self.args.lang_model == 'bert': 
+            
+            # Attention mask to ignore padding tokens. 
+            attention_mask = lang_goal_instr != 0
+            enc_lang_goal_instr = self.emb_word(lang_goal_instr, attention_mask)[0]
+
+            # Project language embedding to the expected dimensionality by rest of model. 
+            enc_lang_goal_instr = self.lang_projection(enc_lang_goal_instr)
+
+        self.lang_dropout(enc_lang_goal_instr)
+
+        return enc_lang_goal_instr
 
     @classmethod
     def featurize(cls, ex, args, test_mode, load_mask=True, load_frames=True):
@@ -70,15 +130,19 @@ class Module(BaseModule):
         # serialize segments
         cls.serialize_lang_action(ex, test_mode)
 
-        # goal and instr language
-        lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+        # goal and instr language. 
+        lang_goal, lang_instr = cls.post_process_lang(ex, args)
 
         # zero inputs if specified
         lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
         lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
         # append goal + instr
-        lang_goal_instr = lang_goal + lang_instr
+        if args.lang_model == 'default': 
+            lang_goal_instr = lang_goal + lang_instr
+        elif args.lang_model == 'bert': 
+            lang_goal_instr = lang_instr + lang_goal
+
         feat['lang_goal_instr'] = lang_goal_instr
 
         # load Resnet features from disk
@@ -93,7 +157,6 @@ class Module(BaseModule):
             assert all(x is not None for x in keep)
             keep.append(keep[-1])  # stop frame
             feat['frames'] = torch.stack(keep, dim=0)
-
 
         #########
         # outputs

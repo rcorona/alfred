@@ -288,11 +288,7 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
-        emb_lang_goal_instr = embed_packed_sequence(self.emb_word, feat['lang_goal_instr'])
-        self.lang_dropout(emb_lang_goal_instr.data)
-        enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
-        enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
-        self.lang_dropout(enc_lang_goal_instr)
+        enc_lang_goal_instr = self.encode_lang_base(feat)
         cont_lang_goal_instr = [enc_att(enc_lang_goal_instr) for enc_att in self.enc_att]
         
         return cont_lang_goal_instr, enc_lang_goal_instr
@@ -404,8 +400,8 @@ class Module(Base):
                 if self.noop_index in controller_attn:
                     stop_start_idx = controller_attn.index(self.noop_index)
                     alow = alow[:stop_start_idx]
-                    controller_attn = controller_attn[:stop_start_idx]
-                    alow_mask = alow_mask[:stop_start_idx]
+                    controller_attn = controller_attn[:stop_start_idx+1]
+                    alow_mask = alow_mask[:stop_start_idx+1]
 
                 """
                 # remove <<stop>> tokens
