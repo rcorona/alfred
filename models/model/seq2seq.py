@@ -104,6 +104,7 @@ class Module(BaseModule):
             # Load BERT tokenizer and model. 
             self.__class__.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
             self.emb_word = BertModel.from_pretrained('bert-base-uncased')
+            self.lang_projection = nn.Sequential(nn.Linear(768, args.dhid * 2), nn.ReLU())
 
         # Low-level actions.  
         self.emb_action_low = nn.Embedding(len(vocab['action_low']), args.demb)
@@ -125,8 +126,8 @@ class Module(BaseModule):
         elif args.lang_model == 'bert': 
 
             # Get strings for goal and low-level instruction. 
-            goal = ''.join(ex['ann']['goal'][:-1] + ['[SEP]'])
-            instr = ''.join([word for desc in ex['ann']['instr'] for word in desc])
+            goal = ''.join(['[SEP]'] + ex['ann']['goal'][:-1] + ['[SEP]'])
+            instr = ''.join(['[CLS]'] + [word for desc in ex['ann']['instr'] for word in desc])
 
             # Run them through tokenizer and concatenate. 
             goal = cls.tokenizer.encode(goal)
@@ -156,6 +157,9 @@ class Module(BaseModule):
             # Attention mask to ignore padding tokens. 
             attention_mask = lang_goal_instr != 0
             enc_lang_goal_instr = self.emb_word(lang_goal_instr, attention_mask)[0]
+
+            # Project language embedding to the expected dimensionality by rest of model. 
+            enc_lang_goal_instr = self.lang_projection(enc_lang_goal_instr)
 
         self.lang_dropout(enc_lang_goal_instr)
 
@@ -197,7 +201,11 @@ class Module(BaseModule):
         lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
         # append goal + instr
-        lang_goal_instr = lang_goal + lang_instr
+        if args.lang_model == 'default': 
+            lang_goal_instr = lang_goal + lang_instr
+        elif args.lang_model == 'bert': 
+            lang_goal_instr = lang_instr + lang_goal
+
         feat['lang_goal_instr'] = lang_goal_instr
 
         # load Resnet features from disk
