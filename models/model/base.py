@@ -668,6 +668,9 @@ class BaseModule(nn.Module):
 
                     out = self.forward(feat)
                     preds = self.extract_preds(out, batch, feat)
+                    if 'action_low_mask' in preds:
+                        # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
+                        del preds['action_low_mask']
                     p_train.update(preds)
                     loss = self.compute_loss(out, batch, feat)
                     for k, v in loss.items():
@@ -813,6 +816,9 @@ class BaseModule(nn.Module):
 
                 out = self.forward(feat)
                 preds = self.extract_preds(out, batch, feat)
+                if 'action_low_mask' in preds:
+                    # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
+                    del preds['action_low_mask']
                 p_dev.update(preds)
                 #pdb.set_trace()
                 loss = self.compute_loss(out, batch, feat)

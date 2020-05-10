@@ -4,6 +4,7 @@ sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 
+import pprint
 import argparse
 import torch.multiprocessing as mp
 from eval_task import EvalTask
@@ -14,6 +15,7 @@ from eval_hierarchical import EvalHierarchical
 
 if __name__ == '__main__':
     # multiprocessing settings
+    print(' '.join(sys.argv))
     mp.set_start_method('spawn')
     manager = mp.Manager()
 
@@ -55,6 +57,7 @@ if __name__ == '__main__':
 
     # parse arguments
     args = parser.parse_args()
+    pprint.pprint(vars(args))
 
     if args.benchmark:
         eval = EvalBenchmark(args, manager)
