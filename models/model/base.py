@@ -510,7 +510,7 @@ class BaseModule(nn.Module):
             bert_optim = AdamW(bert_params, lr=5e-5, weight_decay=0.01)
 
             # Scheduler for warming up bert fine-tuning. 
-            warmup_steps = int(args.epoch * 0.1)
+            warmup_steps = int((args.epoch * (len(train) / args.batch)) * 0.1)
             bert_scheduler = WarmupConstantSchedule(bert_optim, warmup_steps=warmup_steps)
         
         else: 
@@ -553,6 +553,9 @@ class BaseModule(nn.Module):
                     optimizer.step()
                     if args.lang_model == 'bert': 
                         bert_optim.step()
+                        bert_scheduler.step()
+    
+                    print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
 
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()
@@ -564,7 +567,7 @@ class BaseModule(nn.Module):
 
             # Scheduler step for bert warmup if needed. 
             if args.lang_model == 'bert':
-                bert_scheduler.step()
+                pass#bert_scheduler.step()
 
             print('\ntrain subset metrics\n')
             # compute metrics for train

@@ -394,8 +394,8 @@ class Module(Base):
                 if 8 in controller_attn:
                     stop_start_idx = controller_attn.index(8)
                     alow = alow[:stop_start_idx]
-                    controller_attn = controller_attn[:stop_start_idx]
-                    alow_mask = alow_mask[:stop_start_idx]
+                    controller_attn = controller_attn[:stop_start_idx+1]
+                    alow_mask = alow_mask[:stop_start_idx+1]
 
                 """
                 # remove <<stop>> tokens
