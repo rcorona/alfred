@@ -45,6 +45,8 @@ class EvalSubgoals(Eval):
             try:
                 traj = AlfredDataset.load_task_json(model.args, task)[0]
                 if args.modular_subgoals:
+                    assert not args.trained_on_subtrajectories
+                    raise NotImplementedError()
                     filtered_traj_by_subgoal = {
                         # TODO: check that this expects a list
                         subgoal: AlfredDataset.load_task_json(model.args, task, subgoal)
@@ -60,6 +62,11 @@ class EvalSubgoals(Eval):
                         subgoal_filtered_traj_data = filtered_traj_by_subgoal[subgoal]
                     else:
                         subgoal_filtered_traj_data = None
+                    if args.trained_on_subtrajectories:
+                        assert not subgoal_filtered_traj_data
+                        subgoal_filtered_traj_data = AlfredDataset.filter_subgoal_index(
+                            traj, eval_idx, add_stop_in_subtrajectories=True
+                        )
                     cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:
                 import traceback
@@ -70,7 +77,8 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results,
+                 subgoal_filtered_traj_data=None):
         # reset model
         model.reset()
 
@@ -89,12 +97,13 @@ class EvalSubgoals(Eval):
         print("Evaluating: %s\nSubgoal %s (%d)\nInstr: %s" % (traj_data['root'], subgoal_action, eval_idx, subgoal_instr))
 
         if subgoal_filtered_traj_data is not None:
+            # TODO: fix this
             to_input = subgoal_filtered_traj_data
         else:
             to_input = traj_data
 
         # extract language features
-        feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
+        feat = model.featurize(to_input, model.args, test_mode=True, load_mask=False)
         # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
         feat = AlfredDataset.collate_fn([(None, feat)])[1]
         if args.gpu:
@@ -142,6 +151,7 @@ class EvalSubgoals(Eval):
             else:
                 # forward model
                 m_out = model.step(feat, prev_action=prev_action)
+                # traj_data is only used to get the keys returned in m_pred
                 m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
                 m_pred = list(m_pred.values())[0]
 

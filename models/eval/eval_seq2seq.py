@@ -9,7 +9,6 @@ import argparse
 import torch.multiprocessing as mp
 from eval_task import EvalTask
 from eval_subgoals import EvalSubgoals
-from eval_benchmark import EvalBenchmark
 from eval_hierarchical import EvalHierarchical
 
 
@@ -46,32 +45,27 @@ if __name__ == '__main__':
     parser.add_argument('--no_teacher_force_unroll_with_expert', action='store_true', help='no teacher forcing with expert')
 
     parser.add_argument('--modular_subgoals', action='store_true', help='this model was trained with the --subgoal argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+    parser.add_argument('--trained_on_subtrajectories', action='store_true', help='this model was trained with the --train_on_subtrajectories argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
     parser.add_argument('--oracle', action='store_true', help='Use oracle for high-level controller.')
 
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--fast_epoch', dest='fast_epoch', action='store_true')
 
-    parser.add_argument('--benchmark', action='store_true')
-    parser.add_argument('--benchmark_batch_size', type=int, default=1)
-
     # parse arguments
     args = parser.parse_args()
     pprint.pprint(vars(args))
 
-    if args.benchmark:
-        eval = EvalBenchmark(args, manager)
+    # eval mode
+    if args.eval_type == 'subgoals':
+        eval = EvalSubgoals(args, manager)
+
+    elif args.eval_type == 'hierarchical':
+
+        eval = EvalHierarchical(args, manager)
+
     else:
-        # eval mode
-        if args.eval_type == 'subgoals':
-            eval = EvalSubgoals(args, manager)
-
-        elif args.eval_type == 'hierarchical': 
-
-            eval = EvalHierarchical(args, manager)
-
-        else:
-            eval = EvalTask(args, manager)
+        eval = EvalTask(args, manager)
 
     # start threads
     eval.spawn_threads()

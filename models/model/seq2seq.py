@@ -32,11 +32,14 @@ class Module(BaseModule):
 
         self.vocab = vocab
 
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(args).get("lang_model", "default")
+
         # Word embeddings. 
-        if args.lang_model == 'default': 
+        if lang_model == 'default':
             self.emb_word = nn.Embedding(len(vocab['word']), args.demb)
         
-        elif args.lang_model == 'bert': 
+        elif lang_model == 'bert':
             
             # Load BERT tokenizer and model. 
             self.__class__.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -54,13 +57,16 @@ class Module(BaseModule):
         raise NotImplementedError()
 
     @classmethod
-    def post_process_lang(cls, ex, args): 
-        
-        # Default partitioning. 
-        if args.lang_model == 'default':
+    def post_process_lang(cls, ex, args):
+
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(args).get("lang_model", "default")
+
+        # Default partitioning.
+        if lang_model == 'default':
             goal, instr = ex['num']['lang_goal'], ex['num']['lang_instr']
 
-        elif args.lang_model == 'bert': 
+        elif lang_model == 'bert':
 
             # Get strings for goal and low-level instruction. 
             goal = ''.join(['[SEP]'] + ex['ann']['goal'][:-1] + ['[SEP]'])
@@ -77,19 +83,22 @@ class Module(BaseModule):
         lang_goal_instr = feat['lang_goal_instr'].long()
         seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
 
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(self.args).get("lang_model", "default")
+
         # Place on GPU if needed. 
         if self.args.gpu: 
             lang_goal_instr = lang_goal_instr.cuda()
             seq_lengths = seq_lengths.cuda()
 
-        if self.args.lang_model == 'default': 
+        if lang_model == 'default':
             embed_seq = self.emb_word(lang_goal_instr)
             emb_lang_goal_instr = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
             self.lang_dropout(emb_lang_goal_instr.data)
             enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
             enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
 
-        elif self.args.lang_model == 'bert': 
+        elif lang_model == 'bert':
             
             # Attention mask to ignore padding tokens. 
             attention_mask = lang_goal_instr != 0
@@ -137,10 +146,12 @@ class Module(BaseModule):
         lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
         lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
+        lang_model = vars(args).get("lang_model", "default")
+
         # append goal + instr
-        if args.lang_model == 'default': 
+        if lang_model == 'default':
             lang_goal_instr = lang_goal + lang_instr
-        elif args.lang_model == 'bert': 
+        elif lang_model == 'bert':
             lang_goal_instr = lang_instr + lang_goal
 
         feat['lang_goal_instr'] = lang_goal_instr

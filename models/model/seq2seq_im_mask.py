@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
-from models.utils.metric import compute_f1, compute_exact
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
 import tqdm
@@ -276,6 +276,11 @@ class Module(Base):
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
             key = self.get_instance_key(ex)
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
+            label_lower = label.lower()
+            pred_lower = preds[key]['action_low'].lower()
+            m['action_low_f1'].append(compute_f1(label_lower, pred_lower))
+            m['action_low_em'].append(compute_exact(label_lower, pred_lower))
+            m['action_low_gold_length'].append(len(label_lower.split()))
+            m['action_low_pred_length'].append(len(pred_lower.split()))
+            m['action_low_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
         return {k: sum(v)/len(v) for k, v in m.items()}

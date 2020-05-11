@@ -601,18 +601,21 @@ class BaseModule(nn.Module):
 
         # this isn't implemented for instruction_chunker
         if hasattr(args, 'train_on_subtrajectories') and args.train_on_subtrajectories:
-            dataset_class = AlfredSubtrajectoryDataset
+            if args.subgoal:
+                subgoal_names = {args.subgoal}
+            else:
+                subgoal_names = None
+            dataset_constructor = lambda tasks: AlfredSubtrajectoryDataset(args, tasks, self.__class__, False, subgoal_names=subgoal_names)
         else:
-            dataset_class = AlfredDataset
+            dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
 
         # Put dataset splits into wrapper class for parallelizing data-loading.
-        train = dataset_class(args, train, self.__class__, False)
-        valid_seen = dataset_class(args, valid_seen, self.__class__, False)
-        valid_unseen = dataset_class(args, valid_unseen, self.__class__, False)
+        train = dataset_constructor(train)
+        valid_seen = dataset_constructor(valid_seen)
+        valid_unseen = dataset_constructor(valid_unseen)
+        train_subset = dataset_constructor(train_subset)
 
-        train_subset = dataset_class(args, train_subset, self.__class__, False)
-
-        # this didn't seem to give a speedup
+        # setting this to True didn't seem to give a speedup
         pin_memory = False
 
         # DataLoaders
@@ -690,8 +693,7 @@ class BaseModule(nn.Module):
                     if args.lang_model == 'bert': 
                         bert_optim.step()
                         bert_scheduler.step()
-    
-                    print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
+                        print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
 
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()
