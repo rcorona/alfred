@@ -78,7 +78,7 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results,
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, all_logs,
                  subgoal_filtered_traj_data=None):
         # reset model
         model.reset()
@@ -239,6 +239,7 @@ class EvalSubgoals(Eval):
                      'action_low_em': compute_exact(gold_actions_joined, pred_actions_joined),
                      'action_low_edit_distance': compute_edit_distance(gold_actions_joined, pred_actions_joined),
                      }
+        all_logs.append(log_entry)
         if subgoal_success:
             sg_successes = successes[subgoal_action]
             sg_successes.append(log_entry)
@@ -301,6 +302,9 @@ class EvalSubgoals(Eval):
                    'results': dict(self.results)}
 
         save_path = os.path.dirname(self.args.model_path)
-        save_path = os.path.join(save_path, 'subgoal_results_' + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + '.json')
+        save_path = os.path.join(
+            save_path,
+            'subgoal_results_split:{}_{}.json'.format(self.args.eval_split, datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        )
         with open(save_path, 'w') as r:
             json.dump(results, r, indent=4, sort_keys=True)
