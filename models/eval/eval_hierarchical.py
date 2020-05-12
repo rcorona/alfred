@@ -84,7 +84,7 @@ class EvalHierarchical(Eval):
 
             # forward model
             m_out = model.step(feat, oracle=args.oracle)
-            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
             m_pred = list(m_pred.values())[0]
 
             # check if <<stop>> was predicted for both low-level and high-level controller. 

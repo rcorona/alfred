@@ -8,6 +8,7 @@ from env.thor_env import ThorEnv
 from eval import Eval
 
 from models.model.base import AlfredDataset, move_dict_to_cuda
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 
 
 class EvalSubgoals(Eval):
@@ -88,6 +89,7 @@ class EvalSubgoals(Eval):
 
         # expert demonstration to reach eval_idx-1
         expert_init_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] < eval_idx]
+        expert_true_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] == eval_idx]
 
         # subgoal info
         subgoal_action = traj_data['plan']['high_pddl'][eval_idx]['discrete_action']['action']
@@ -112,6 +114,7 @@ class EvalSubgoals(Eval):
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None
 
+        pred_actions = []
         done, subgoal_success = False, False
         fails = 0
         t = 0
@@ -152,12 +155,14 @@ class EvalSubgoals(Eval):
                 # forward model
                 m_out = model.step(feat, prev_action=prev_action)
                 # traj_data is only used to get the keys returned in m_pred
-                m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+                m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
                 m_pred = list(m_pred.values())[0]
 
                 # get action and mask
                 action, mask = m_pred['action_low'], m_pred['action_low_mask'][0]
                 mask = np.squeeze(mask, axis=0) if model.has_interaction(action) else None
+
+                pred_actions.append(action)
 
                 # debug
                 if args.debug:
@@ -212,6 +217,11 @@ class EvalSubgoals(Eval):
                     'sr_plw': 0.
             }
 
+        gold_actions = [action['action'] for action in expert_true_actions]
+
+        pred_actions_joined = ' '.join(pred_actions).lower()
+        gold_actions_joined = ' '.join(gold_actions).lower()
+
         log_entry = {'trial': traj_data['task_id'],
                      'type': traj_data['task_type'],
                      'repeat_idx': int(r_idx),
@@ -222,7 +232,12 @@ class EvalSubgoals(Eval):
                      'subgoal_path_weighted_success_spl': float(plw_s_spl),
                      'subgoal_path_len_weight': float(expert_pl),
                      'reward': float(reward),
-                     'num_steps': t,
+                     'num_steps': t - len(expert_init_actions),
+                     'action_low_pred_length': float(len(pred_actions)),
+                     'action_low_gold_length': float(len(gold_actions)),
+                     'action_low_f1': compute_f1(gold_actions_joined, pred_actions_joined),
+                     'action_low_em': compute_exact(gold_actions_joined, pred_actions_joined),
+                     'action_low_edit_distance': compute_edit_distance(gold_actions_joined, pred_actions_joined),
                      }
         if subgoal_success:
             sg_successes = successes[subgoal_action]
@@ -262,7 +277,14 @@ class EvalSubgoals(Eval):
                 print("avg steps (successes): %.3f" % (0 if not successes[sg] else successes_num_steps / float(num_successes)))
                 print("avg steps (failures): %.3f" % (0 if not failures[sg] else failures_num_steps / float(num_failures)))
                 print("avg steps (overall): %.3f" % ((successes_num_steps + failures_num_steps) / float(num_evals)))
-        print("------------")
+                print()
+                for stat in [ 'action_low_pred_length', 'action_low_gold_length', 'action_low_f1', 'action_low_em', 'action_low_edit_distance' ]:
+                    print("%s (successes): %.3f" % (stat, (0 if not successes[sg] else sum(d[stat] for d in successes[sg]) / float(num_successes))))
+                    print("%s (failures): %.3f" % (stat, (0 if not failures[sg] else sum(d[stat] for d in failures[sg]) / float(num_failures))))
+                    print("%s (overall): %.3f" % (stat, (sum(d[stat] for d in (failures[sg] + successes[sg])) / float(num_evals))))
+                    print()
+
+            print("------------")
 
         lock.release()
 

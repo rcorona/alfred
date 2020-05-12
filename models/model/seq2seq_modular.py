@@ -275,7 +275,7 @@ class Module(Base):
         return feat
 
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False):
         '''
         output processing
         '''
@@ -304,8 +304,9 @@ class Module(Base):
             key = self.get_instance_key(ex)
             pred[key] = {
                 'action_low': ' '.join(words),
-                'action_low_mask': p_mask,
             }
+            if return_masks:
+                pred[key]['action_low_mask'] = p_mask
 
         return pred
 
