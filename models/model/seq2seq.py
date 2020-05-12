@@ -201,7 +201,7 @@ class Module(BaseModule):
             this_debug = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
-                'p_action_low': preds[key]['action_low']
+                'p_action_low': preds[key]['action_low_names']
             }
             if 'controller_attn' in preds[key]:
                 this_debug['p_action_high'] = preds[key]['controller_attn']
