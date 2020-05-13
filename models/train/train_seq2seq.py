@@ -71,7 +71,7 @@ def make_parser():
     parser.add_argument('--actor_dropout', help='dropout rate for actor fc', default=0., type=float)
 
     # other model args
-    parser.add_args('--encoder_decoder_transform',
+    parser.add_argument('--encoder_decoder_transform',
                     default='identity',
                     choices=['identity', 'zero', 'linear', 'mlp'],
                     help='transform the encoder--decoder connection using this')
