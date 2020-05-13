@@ -35,6 +35,32 @@ class DotAttn(nn.Module):
         score = F.softmax(raw_score, dim=1)
         return score
 
+class MLP(nn.Module):
+    def __init__(self, d_in, d_out, d_hid, num_linears=2):
+        super().__init__()
+        self.d_in = d_in
+        self.d_out = d_out
+        self.d_hid = d_hid
+        self.num_linears = num_linears
+
+        layers = []
+        for i in range(num_linears):
+            if i == 0:
+                d_i = d_in
+            else:
+                d_i = d_hid
+            is_last = i == num_linears - 1
+            if is_last:
+                d_o = d_out
+            else:
+                d_o = d_hid
+            layers.append(nn.Linear(d_i, d_o, bias=True))
+            if not is_last:
+                layers.append(nn.ReLU())
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layers(x)
 
 class ResnetVisualEncoder(nn.Module):
     '''

@@ -70,6 +70,12 @@ def make_parser():
     parser.add_argument('--attn_dropout', help='dropout rate for attention', default=0., type=float)
     parser.add_argument('--actor_dropout', help='dropout rate for actor fc', default=0., type=float)
 
+    # other model args
+    parser.add_args('--encoder_decoder_transform',
+                    default='identity',
+                    choices=['identity', 'zero', 'linear', 'mlp'],
+                    help='transform the encoder--decoder connection using this')
+
     # other settings
     parser.add_argument('--dec_teacher_forcing', help='use gpu', action='store_true')
     parser.add_argument('--temp_no_history', help='use gpu', action='store_true')
@@ -117,6 +123,11 @@ if __name__ == '__main__':
         vocab = torch.load(os.path.join(args.dout, "%s.vocab" % args.pp_folder))
     else:
         vocab = torch.load(os.path.join(args.data, "%s.vocab" % args.pp_folder))
+
+    if args.encoder_decoder_transform != 'identity' and not args.model.endswith('seq2seq_im_mask'):
+        raise NotImplementedError("non-identity transform {} for model {}".format(
+            args.encoder_decoder_transform, args.model
+        ))
 
     # load model
     M = import_module('model.{}'.format(args.model))

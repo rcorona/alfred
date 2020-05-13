@@ -8,6 +8,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
+
+from models.nn.vnn import MLP
 from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -17,7 +19,6 @@ from models.model.base import embed_packed_sequence, move_dict_to_cuda
 
 
 class Module(Base):
-
     def __init__(self, args, vocab):
         '''
         Seq2Seq agent
@@ -40,6 +41,20 @@ class Module(Base):
                            actor_dropout=args.actor_dropout,
                            input_dropout=args.input_dropout,
                            teacher_forcing=args.dec_teacher_forcing)
+
+        # encoder -- decoder transformation
+        connection_type = vars(self.args).get('encoder_decoder_transform', 'identity')
+        if connection_type == 'identity':
+            self.enc_to_dec = nn.Sequential()
+        elif connection_type == 'linear':
+            self.enc_to_dec = nn.Linear(args.dhid*2, args.dhid*2)
+        elif connection_type == 'mlp':
+            # TODO: this is massive! but I'm worried about the low-rank if we bottleneck; maybe overparam is good
+            self.enc_to_dec = MLP(args.dhid*2, args.dhid*2, args.dhid*2, num_linears=2)
+        elif connection_type == 'zero':
+            self.enc_to_dec = None
+        else:
+            raise ValueError("invalid --encoder_decoder_transform {}".format(connection_type))
 
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)
@@ -85,7 +100,7 @@ class Module(Base):
             move_dict_to_cuda(feat)
         cont_lang, enc_lang = self.encode_lang(feat)
 
-        state_0 = cont_lang, torch.zeros_like(cont_lang)
+        state_0 = self.create_decoder_init_state(cont_lang)
         frames = self.vis_dropout(feat['frames'])
         res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
         feat.update(res)
@@ -113,6 +128,17 @@ class Module(Base):
             'enc_lang': None
         }
 
+    def create_decoder_init_state(self, cont_lang):
+        c = torch.zeros_like(cont_lang)
+        connection_type = vars(self.args).get('encoder_decoder_connection', 'identity')
+        if connection_type in {'identity', 'linear', 'mlp'}:
+            h = self.enc_to_dec(cont_lang)
+        elif connection_type == 'zero':
+            h = torch.zeros_like(cont_lang)
+        else:
+            raise ValueError("invalid --encoder_decoder_transform {}".format(connection_type))
+        return h, c
+
     def step(self, feat, prev_action=None):
         '''
         forward the model for a single time-step (used for real-time execution during eval)
@@ -125,7 +151,8 @@ class Module(Base):
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
-            self.r_state['state_t'] = self.r_state['cont_lang'], torch.zeros_like(self.r_state['cont_lang'])
+            # self.r_state['state_t'] = self.r_state['cont_lang'], torch.zeros_like(self.r_state['cont_lang'])
+            self.r_state['state_t'] = self.create_decoder_init_state(self.r_state['cont_lang'])
 
         # previous action embedding
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
