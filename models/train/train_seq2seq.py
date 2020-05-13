@@ -1,5 +1,6 @@
 import os
 import sys
+
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
@@ -61,13 +62,13 @@ if __name__ == '__main__':
     parser.add_argument('--dec_teacher_forcing', help='use gpu', action='store_true')
     parser.add_argument('--temp_no_history', help='use gpu', action='store_true')
 
-    # Custom parameters. 
+    # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
 
     # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
     parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
-    
+
     # args and init
     args = parser.parse_args()
     args.dout = args.dout.format(**vars(args))
