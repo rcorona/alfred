@@ -208,7 +208,7 @@ class Module(BaseModule):
             }
             if 'controller_attn' in preds[key]:
                 this_debug['p_action_high'] = preds[key]['controller_attn']
-            debug['{}--{}'.format(*key)] = this_debug
+            debug['--'.join(map(str, key))] = this_debug
         return debug
 
     @classmethod

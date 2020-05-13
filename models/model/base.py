@@ -746,7 +746,7 @@ class BaseModule(nn.Module):
                     json.dump(stats, f, indent=2)
 
                 if not args.no_make_debug:
-                    fpred = os.path.join(args.dout, 'valid_seen.debug.preds.json')
+                    fpred = os.path.join(args.dout, 'valid_seen.epoch-{}.debug.preds.json'.format(epoch))
                     with open(fpred, 'wt') as f:
                         json.dump(self.make_debug(p_valid_seen, valid_seen), f, indent=2)
                 best_loss['valid_seen'] = total_valid_seen_loss
@@ -767,7 +767,7 @@ class BaseModule(nn.Module):
                     json.dump(stats, f, indent=2)
 
                 if not args.no_make_debug:
-                    fpred = os.path.join(args.dout, 'valid_unseen.debug.preds.json')
+                    fpred = os.path.join(args.dout, 'valid_unseen.epoch-{}.debug.preds.json'.format(epoch))
                     with open(fpred, 'wt') as f:
                         json.dump(self.make_debug(p_valid_unseen, valid_unseen), f, indent=2)
 
@@ -788,7 +788,7 @@ class BaseModule(nn.Module):
 
             # debug action output json
             if not args.no_make_debug:
-                fpred = os.path.join(args.dout, 'train_subset.debug.preds.json')
+                fpred = os.path.join(args.dout, 'train_subset.epoch-{}.debug.preds.json'.format(epoch))
                 with open(fpred, 'wt') as f:
                     json.dump(self.make_debug(p_train, train_subset), f, indent=2)
 
