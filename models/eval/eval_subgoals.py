@@ -183,6 +183,7 @@ class EvalSubgoals(Eval):
                 prev_action = str(action)
 
                 if is_hierarchical:
+                    is_terminal = False
                     # check if <<stop>> was predicted for both low-level and high-level controller.
                     # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
                     if m_pred['controller_attn'][0] == 8:
