@@ -103,6 +103,8 @@ class SubgoalChunker(BaseModule):
         # can transition from B to I of the same subgoal
         for b, i in zip(self.BEGIN_INDICES, self.INSIDE_INDICES):
             transition_mat[i, b] = 0
+        for i in self.INSIDE_INDICES:
+            transition_mat[i, i] = 0
         # scores from transitioning from B to B of each subgoal type
         transition_mat[np.ix_(self.BEGIN_INDICES,self.BEGIN_INDICES)] = self.tag_transitions
         # scores from transitioning from I to B of each subgoal type
@@ -256,7 +258,12 @@ class SubgoalChunker(BaseModule):
         gold_parts = LinearChainCRF.struct.to_parts(
             feat['chunk_tags'], len(self.LABEL_VOCAB), lengths=feat['lang_instr_len']
         )
-        log_likelihood = feat['out_chunk_dist'].log_prob(gold_parts).mean()
+        log_likelihoods = feat['out_chunk_dist'].log_prob(gold_parts)
+        log_likelihood = log_likelihoods.mean()
+        if log_likelihood < -1e7:
+            print("warning: check potential construction; huge loss {}".format(-log_likelihood))
+            batch_keys = [(ex['task_id'], ex['repeat_idx']) for ex in batch]
+            print(zip(batch_keys, log_likelihoods))
         losses['chunk_tags'] = -log_likelihood
 
         return losses
