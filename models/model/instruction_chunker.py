@@ -8,10 +8,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
-from models.model.base import BaseModule, move_dict_to_cuda
+from models.model.base import BaseModule, move_dict_to_cuda, embed_packed_sequence
 from models.nn import vnn
-
-from models.model.base import embed_packed_sequence
 
 def compute_acc(gold, pred):
     assert len(gold) == len(pred), (gold, pred)
@@ -129,9 +127,13 @@ class Chunker(BaseModule):
 
     def encode_lang(self, feat):
         '''
-        encode goal+instr language
+        encode instr language
         '''
-        emb_lang_instr = embed_packed_sequence(self.emb_word, feat['lang_instr'])
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
+
+        packed_lang_instr = pack_padded_sequence(feat['lang_instr'], feat['lang_instr_len'], batch_first=True, enforce_sorted=False)
+        emb_lang_instr = embed_packed_sequence(self.emb_word, packed_lang_instr)
         # apply dropout in-place
         self.lang_dropout(emb_lang_instr.data)
         emb_lang_instr, _ = self.enc(emb_lang_instr)
@@ -139,9 +141,6 @@ class Chunker(BaseModule):
         self.lang_dropout(emb_lang_instr)
 
         return emb_lang_instr
-
-        # cont_lang_instr = self.enc_att(emb_lang_instr)
-        # return cont_lang_instr, emb_lang_instr
 
     def forward(self, feat, max_decode=None):
         # Move everything onto gpu if needed.

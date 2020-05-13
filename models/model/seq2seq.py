@@ -81,7 +81,9 @@ class Module(BaseModule):
     def encode_lang_base(self, feat): 
 
         lang_goal_instr = feat['lang_goal_instr'].long()
-        seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
+        # the line below doesn't account for padding
+        # seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
+        seq_lengths = feat['lang_goal_instr_len']
 
         # for backward compatibility when evaluating models trained before the BERT code was implemented
         lang_model = vars(self.args).get("lang_model", "default")
@@ -155,6 +157,7 @@ class Module(BaseModule):
             lang_goal_instr = lang_instr + lang_goal
 
         feat['lang_goal_instr'] = lang_goal_instr
+        feat['lang_goal_instr_len'] = len(lang_goal_instr)
 
         # load Resnet features from disk
         if load_frames and not test_mode:

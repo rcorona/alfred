@@ -78,6 +78,7 @@ def make_parser():
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
 
     parser.add_argument('--print_git', action='store_true')
+    parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")
 
     return parser
 
