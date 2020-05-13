@@ -130,7 +130,7 @@ class Module(Base):
 
     def create_decoder_init_state(self, cont_lang):
         c = torch.zeros_like(cont_lang)
-        connection_type = vars(self.args).get('encoder_decoder_connection', 'identity')
+        connection_type = vars(self.args).get('encoder_decoder_transform', 'identity')
         if connection_type in {'identity', 'linear', 'mlp'}:
             h = self.enc_to_dec(cont_lang)
         elif connection_type == 'zero':
