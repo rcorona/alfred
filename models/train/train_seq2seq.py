@@ -75,6 +75,7 @@ def make_parser():
                     default='identity',
                     choices=['identity', 'zero', 'linear', 'mlp'],
                     help='transform the encoder--decoder connection using this')
+    parser.add_argument('--learn_cell_init', action='store_true', help='learn the lstm cell initialization')
 
     # other settings
     parser.add_argument('--dec_teacher_forcing', help='use gpu', action='store_true')
@@ -127,6 +128,10 @@ if __name__ == '__main__':
     if args.encoder_decoder_transform != 'identity' and not args.model.endswith('seq2seq_im_mask'):
         raise NotImplementedError("non-identity transform {} for model {}".format(
             args.encoder_decoder_transform, args.model
+        ))
+    if args.learn_cell_init and not args.model.endswith('seq2seq_im_mask'):
+        raise NotImplementedError("learn_cell_init for model {}".format(
+            args.model
         ))
 
     # load model

@@ -56,6 +56,12 @@ class Module(Base):
         else:
             raise ValueError("invalid --encoder_decoder_transform {}".format(connection_type))
 
+        learn_cell_init = vars(self.args).get('learn_cell_init', False)
+        if learn_cell_init:
+            self.cell_init = nn.Parameter(torch.zeros(args.dhid*2), requires_grad=True)
+        else:
+            self.cell_init = None
+
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)
         self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
@@ -129,7 +135,12 @@ class Module(Base):
         }
 
     def create_decoder_init_state(self, cont_lang):
-        c = torch.zeros_like(cont_lang)
+        learn_cell_init = vars(self.args).get('learn_cell_init', False)
+        if learn_cell_init:
+            c = self.cell_init.repeat(cont_lang.size(0), 1)
+            assert c.size() == cont_lang.size()
+        else:
+            c = torch.zeros_like(cont_lang)
         connection_type = vars(self.args).get('encoder_decoder_transform', 'identity')
         if connection_type in {'identity', 'linear', 'mlp'}:
             h = self.enc_to_dec(cont_lang)
