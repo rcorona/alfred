@@ -1,5 +1,6 @@
 import os
 import sys
+
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
@@ -11,6 +12,7 @@ from eval_task import EvalTask
 from eval_subgoals import EvalSubgoals
 from eval_hierarchical import EvalHierarchical
 
+from models.utils.helper_utils import print_git_info
 
 if __name__ == '__main__':
     # multiprocessing settings
@@ -52,9 +54,14 @@ if __name__ == '__main__':
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--fast_epoch', dest='fast_epoch', action='store_true')
 
+    parser.add_argument('--print_git', action='store_true')
+
     # parse arguments
     args = parser.parse_args()
     pprint.pprint(vars(args))
+
+    if args.print_git:
+        print_git_info()
 
     # eval mode
     if args.eval_type == 'subgoals':

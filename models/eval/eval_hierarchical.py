@@ -58,7 +58,8 @@ class EvalHierarchical(Eval):
         feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
         
         # Post process subgoals from names to indexes.
-        feat['module_idxs'] = model.vocab['high_level'].word2index(feat['module_idxs'])
+        # this is now done in Module.featurize()
+        # feat['module_idxs_per_subgoal'] = model.vocab['high_level'].word2index(feat['module_idxs'])
         
         # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
         feat = AlfredDataset.collate_fn([(None, feat)])[1]
@@ -84,10 +85,10 @@ class EvalHierarchical(Eval):
 
             # forward model
             m_out = model.step(feat, oracle=args.oracle)
-            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
             m_pred = list(m_pred.values())[0]
 
-            # check if <<stop>> was predicted for both low-level and high-level controller. 
+            # check if <<stop>> was predicted for both low-level and high-level controller.
             if m_pred['controller_attn'][0] == 8: 
                 print("\tpredicted STOP")
                 break

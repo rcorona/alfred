@@ -143,7 +143,7 @@ class Module(Base):
         return feat
 
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False):
         '''
         output processing
         '''
@@ -175,9 +175,10 @@ class Module(Base):
             # print(len(p_mask))
 
             pred[key] = {
-                'action_low': ' '.join(words),
-                'action_low_mask': p_mask,
+                'action_low_names': words,
             }
+            if return_masks:
+                pred[key]['action_low_mask'] = p_mask
 
         return pred
 
@@ -275,12 +276,11 @@ class Module(Base):
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
             key = self.get_instance_key(ex)
-            label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            label_lower = label.lower()
-            pred_lower = preds[key]['action_low'].lower()
-            m['action_low_f1'].append(compute_f1(label_lower, pred_lower))
-            m['action_low_em'].append(compute_exact(label_lower, pred_lower))
-            m['action_low_gold_length'].append(len(label_lower.split()))
-            m['action_low_pred_length'].append(len(pred_lower.split()))
-            m['action_low_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
+            label_actions = [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
+            pred_actions = preds[key]['action_low_names']
+            m['action_low_f1'].append(compute_f1(label_actions, pred_actions))
+            m['action_low_em'].append(compute_exact(label_actions, pred_actions))
+            m['action_low_gold_length'].append(len(label_actions))
+            m['action_low_pred_length'].append(len(pred_actions))
+            m['action_low_edit_distance'].append(compute_edit_distance(label_actions, pred_actions))
         return {k: sum(v)/len(v) for k, v in m.items()}

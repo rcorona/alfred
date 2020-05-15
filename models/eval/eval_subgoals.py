@@ -8,6 +8,7 @@ from env.thor_env import ThorEnv
 from eval import Eval
 
 from models.model.base import AlfredDataset, move_dict_to_cuda
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 
 
 class EvalSubgoals(Eval):
@@ -77,8 +78,13 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results,
-                 subgoal_filtered_traj_data=None):
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
+        if args.model == "models.model.seq2seq_hierarchical":
+            is_hierarchical = True
+        elif args.model == "models.model.seq2seq_im_mask":
+            is_hierarchical = False
+        else:
+            raise ValueError("invalid model type {}".format(args.model))
         # reset model
         model.reset()
 
@@ -88,6 +94,7 @@ class EvalSubgoals(Eval):
 
         # expert demonstration to reach eval_idx-1
         expert_init_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] < eval_idx]
+        expert_true_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] == eval_idx]
 
         # subgoal info
         subgoal_action = traj_data['plan']['high_pddl'][eval_idx]['discrete_action']['action']
@@ -112,6 +119,7 @@ class EvalSubgoals(Eval):
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None
 
+        pred_actions = []
         done, subgoal_success = False, False
         fails = 0
         t = 0
@@ -135,7 +143,10 @@ class EvalSubgoals(Eval):
 
                 # forward model
                 if not args.skip_model_unroll_with_expert:
-                    model.step(feat, prev_action=prev_action)
+                    if is_hierarchical:
+                        model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                    else:
+                        model.step(feat, prev_action=prev_action)
                     prev_action = action['action'] if not args.no_teacher_force_unroll_with_expert else None
 
                 # execute expert action
@@ -150,14 +161,19 @@ class EvalSubgoals(Eval):
             # subgoal evaluation
             else:
                 # forward model
-                m_out = model.step(feat, prev_action=prev_action)
+                if is_hierarchical:
+                    m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                else:
+                    m_out = model.step(feat, prev_action=prev_action)
                 # traj_data is only used to get the keys returned in m_pred
-                m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+                m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
                 m_pred = list(m_pred.values())[0]
 
                 # get action and mask
-                action, mask = m_pred['action_low'], m_pred['action_low_mask'][0]
+                action, mask = m_pred['action_low_names'][0], m_pred['action_low_mask'][0]
                 mask = np.squeeze(mask, axis=0) if model.has_interaction(action) else None
+
+                pred_actions.append(action)
 
                 # debug
                 if args.debug:
@@ -166,7 +182,20 @@ class EvalSubgoals(Eval):
                 # update prev action
                 prev_action = str(action)
 
-                if action not in cls.TERMINAL_TOKENS:
+                if is_hierarchical:
+                    is_terminal = False
+                    # check if <<stop>> was predicted for both low-level and high-level controller.
+                    # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
+                    if m_pred['controller_attn'][0] == 8:
+                        is_terminal = True
+
+                    # If we are switching submodules, then skip this step.
+                    elif m_pred['action_low_names'][0] == cls.STOP_TOKEN:
+                        continue
+                else:
+                    is_terminal = action in cls.TERMINAL_TOKENS
+
+                if not is_terminal:
                     # use predicted action and mask (if provided) to interact with the env
                     t_success, _, _, err, _ = env.va_interact(action, interact_mask=mask, smooth_nav=args.smooth_nav, debug=args.debug)
                     if not t_success:
@@ -186,7 +215,7 @@ class EvalSubgoals(Eval):
                     break
 
                 # terminal tokens predicted
-                if action in cls.TERMINAL_TOKENS:
+                if is_terminal:
                     print("predicted %s" % action)
                     break
 
@@ -212,6 +241,11 @@ class EvalSubgoals(Eval):
                     'sr_plw': 0.
             }
 
+        gold_actions = [action['action'] for action in expert_true_actions]
+
+        pred_actions_joined = ' '.join(pred_actions).lower()
+        gold_actions_joined = ' '.join(gold_actions).lower()
+
         log_entry = {'trial': traj_data['task_id'],
                      'type': traj_data['task_type'],
                      'repeat_idx': int(r_idx),
@@ -222,7 +256,12 @@ class EvalSubgoals(Eval):
                      'subgoal_path_weighted_success_spl': float(plw_s_spl),
                      'subgoal_path_len_weight': float(expert_pl),
                      'reward': float(reward),
-                     'num_steps': t,
+                     'num_steps': t - len(expert_init_actions) + 1,
+                     'action_low_pred_length': float(len(pred_actions)),
+                     'action_low_gold_length': float(len(gold_actions)),
+                     'action_low_f1': compute_f1(gold_actions_joined, pred_actions_joined),
+                     'action_low_em': compute_exact(gold_actions_joined, pred_actions_joined),
+                     'action_low_edit_distance': compute_edit_distance(gold_actions_joined, pred_actions_joined),
                      }
         if subgoal_success:
             sg_successes = successes[subgoal_action]
@@ -262,7 +301,14 @@ class EvalSubgoals(Eval):
                 print("avg steps (successes): %.3f" % (0 if not successes[sg] else successes_num_steps / float(num_successes)))
                 print("avg steps (failures): %.3f" % (0 if not failures[sg] else failures_num_steps / float(num_failures)))
                 print("avg steps (overall): %.3f" % ((successes_num_steps + failures_num_steps) / float(num_evals)))
-        print("------------")
+                print()
+                for stat in [ 'action_low_pred_length', 'action_low_gold_length', 'action_low_f1', 'action_low_em', 'action_low_edit_distance' ]:
+                    print("%s (successes): %.3f" % (stat, (0 if not successes[sg] else sum(d[stat] for d in successes[sg]) / float(num_successes))))
+                    print("%s (failures): %.3f" % (stat, (0 if not failures[sg] else sum(d[stat] for d in failures[sg]) / float(num_failures))))
+                    print("%s (overall): %.3f" % (stat, (sum(d[stat] for d in (failures[sg] + successes[sg])) / float(num_evals))))
+                    print()
+
+            print("------------")
 
         lock.release()
 
@@ -279,6 +325,9 @@ class EvalSubgoals(Eval):
                    'results': dict(self.results)}
 
         save_path = os.path.dirname(self.args.model_path)
-        save_path = os.path.join(save_path, 'subgoal_results_' + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + '.json')
+        save_path = os.path.join(
+            save_path,
+            'subgoal_results_split:{}_{}.json'.format(self.args.eval_split, datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        )
         with open(save_path, 'w') as r:
             json.dump(results, r, indent=4, sort_keys=True)

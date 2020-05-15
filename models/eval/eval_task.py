@@ -45,6 +45,12 @@ class EvalTask(Eval):
 
     @classmethod
     def evaluate(cls, env, model, r_idx, resnet, traj_data, args, lock, successes, failures, results):
+        if args.model == "models.model.seq2seq_hierarchical":
+            is_hierarchical = True
+        elif args.model == "models.model.seq2seq_im_mask":
+            is_hierarchical = False
+        else:
+            raise ValueError("invalid model type {}".format(args.model))
         # reset model
         model.reset()
 
@@ -77,17 +83,35 @@ class EvalTask(Eval):
             feat['frames'] = resnet.featurize([curr_image], batch=1).unsqueeze(1)
 
             # forward model
-            m_out = model.step(feat)
-            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False)
+            if is_hierarchical:
+                m_out = model.step(feat, oracle=args.oracle)
+            else:
+                if args.oracle:
+                    raise NotImplementedError()
+                m_out = model.step(feat)
+            m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
             m_pred = list(m_pred.values())[0]
 
-            # check if <<stop>> was predicted
-            if m_pred['action_low'] == cls.STOP_TOKEN:
-                print("\tpredicted STOP")
-                break
+            if is_hierarchical:
+                # check if <<stop>> was predicted for both low-level and high-level controller.
+                # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
+                if m_pred['controller_attn'][0] == 8:
+                    print("\tpredicted STOP")
+                    break
+
+                # If we are switching submodules, then skip this step. 
+                elif m_pred['action_low_names'][0] == cls.STOP_TOKEN:
+                    continue
+            else:
+                # check if <<stop>> was predicted
+                if m_pred['action_low_names'][0] == cls.STOP_TOKEN:
+                    print("\tpredicted STOP")
+                    break
 
             # get action and mask
-            action, mask = m_pred['action_low'], m_pred['action_low_mask'][0]
+            action, mask = m_pred['action_low_names'][0], m_pred['action_low_mask'][0]
+            # if is_hierarchical:
+            #     action = model.vocab['action_low'].index2word(m_pred['action_low'])[0]
             mask = np.squeeze(mask, axis=0) if model.has_interaction(action) else None
 
             # print action

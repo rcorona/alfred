@@ -391,7 +391,7 @@ class AlfredDataset(Dataset):
                 pad_seq = pad_sequence(pad_sequence(seqs, batch_first=True, padding_value=0))
                 seq_lengths = np.array(list(map(len, v)))
                 feat[k] = (pad_seq, seq_lengths)
-            elif k in {'lang_instr_len'}:
+            elif k in {'lang_goal_instr_len', 'lang_instr_len'}:
                 feat[k] = torch.tensor(v, dtype=torch.long)
             else:
                 # default: tensorize and pad sequence
@@ -632,7 +632,7 @@ class BaseModule(nn.Module):
             json.dump(vars(args), f, indent=2)
 
         # optimizer
-        if args.lang_model == 'bert':
+        if vars(args).get('lang_model', '') == 'bert':
             self.emb_word.requires_grad = False
             self.lang_projection.requires_grad = False
 
@@ -683,14 +683,14 @@ class BaseModule(nn.Module):
 
                     # optimizer backward pass, also optimize bert params if needed. 
                     optimizer.zero_grad()                    
-                    if args.lang_model == 'bert': 
+                    if vars(args).get('lang_model', '') == 'bert':
                         bert_optim.zero_grad()
                     
                     sum_loss = sum(loss.values())
                     sum_loss.backward()
 
                     optimizer.step()
-                    if args.lang_model == 'bert': 
+                    if vars(args).get('lang_model', '') == 'bert':
                         bert_optim.step()
                         bert_scheduler.step()
                         print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
@@ -704,7 +704,7 @@ class BaseModule(nn.Module):
                     # print('Batch time in seconds: {}'.format(e_time - s_time))
 
             # Scheduler step for bert warmup if needed. 
-            if args.lang_model == 'bert':
+            if vars(args).get('lang_model', '') == 'bert':
                 pass#bert_scheduler.step()
 
             print('\ntrain subset metrics\n')
@@ -745,9 +745,10 @@ class BaseModule(nn.Module):
                 with open(fbest, 'wt') as f:
                     json.dump(stats, f, indent=2)
 
-                fpred = os.path.join(args.dout, 'valid_seen.debug.preds.json')
-                with open(fpred, 'wt') as f:
-                    json.dump(self.make_debug(p_valid_seen, valid_seen), f, indent=2)
+                if not args.no_make_debug:
+                    fpred = os.path.join(args.dout, 'valid_seen.epoch-{}.debug.preds.json'.format(epoch))
+                    with open(fpred, 'wt') as f:
+                        json.dump(self.make_debug(p_valid_seen, valid_seen), f, indent=2)
                 best_loss['valid_seen'] = total_valid_seen_loss
 
             # new best valid_unseen loss
@@ -765,9 +766,10 @@ class BaseModule(nn.Module):
                 with open(fbest, 'wt') as f:
                     json.dump(stats, f, indent=2)
 
-                fpred = os.path.join(args.dout, 'valid_unseen.debug.preds.json')
-                with open(fpred, 'wt') as f:
-                    json.dump(self.make_debug(p_valid_unseen, valid_unseen), f, indent=2)
+                if not args.no_make_debug:
+                    fpred = os.path.join(args.dout, 'valid_unseen.epoch-{}.debug.preds.json'.format(epoch))
+                    with open(fpred, 'wt') as f:
+                        json.dump(self.make_debug(p_valid_unseen, valid_unseen), f, indent=2)
 
                 best_loss['valid_unseen'] = total_valid_unseen_loss
 
@@ -785,9 +787,10 @@ class BaseModule(nn.Module):
             }, fsave)
 
             # debug action output json
-            fpred = os.path.join(args.dout, 'train_subset.debug.preds.json')
-            with open(fpred, 'wt') as f:
-                json.dump(self.make_debug(p_train, train_subset), f, indent=2)
+            if not args.no_make_debug:
+                fpred = os.path.join(args.dout, 'train_subset.epoch-{}.debug.preds.json'.format(epoch))
+                with open(fpred, 'wt') as f:
+                    json.dump(self.make_debug(p_train, train_subset), f, indent=2)
 
             iters_by_split = {
                 'train': train_iter,

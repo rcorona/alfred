@@ -123,11 +123,10 @@ class Module(Base):
         #########
         
         # Only get ground truth high level pddl plan. 
-        if test_mode:
-            feat['module_idxs'] = [subgoal['discrete_action']['action'] for subgoal in ex['plan']['high_pddl']]             
+        module_names_per_subgoal = [subgoal['discrete_action']['action'] for subgoal in ex['plan']['high_pddl']]
+        feat['module_idxs_per_subgoal'] = [cls.submodule_names.index(name) for name in module_names_per_subgoal]
 
-        else:
-
+        if not test_mode:
             if load_mask:
                 feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
 
@@ -327,7 +326,7 @@ class Module(Base):
             # Force subgoal module selection if using oracle. 
             if oracle: 
                 controller_mask = torch.zeros(1, 9).float()
-                controller_mask[:,feat['module_idxs'][0]] = 1.0
+                controller_mask[:,feat['module_idxs_per_subgoal'][0]] = 1.0
                 
                 if self.args.gpu:
                     controller_mask = controller_mask.cuda()
@@ -354,7 +353,7 @@ class Module(Base):
 
             # Either use max over attention or oracle subgoal selection. 
             if oracle: 
-                max_subgoal = feat['module_idxs'][self.r_state['subgoal_counter']]
+                max_subgoal = feat['module_idxs_per_subgoal'][self.r_state['subgoal_counter']]
 
             else:
                 # Only pay attention to a single module.
@@ -378,7 +377,7 @@ class Module(Base):
 
         return feat
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False):
         '''
         output processing
         '''
@@ -420,12 +419,16 @@ class Module(Base):
 
             key = self.get_instance_key(ex)
 
+            words = self.vocab['action_low'].index2word(alow)
+
             # print(len(p_mask))
             pred[key] = {
-                'action_low': alow,
-                'action_low_mask': p_mask,
-                'controller_attn': controller_attn
+                'action_low_names': words,
+                'action_low_idxs': alow,
+                'controller_attn': controller_attn, # I think this has one element for each timestep, plus NoOp (stop)
             }
+            if return_masks:
+                pred[key]['action_low_mask'] = p_mask
 
         return pred
 
@@ -538,38 +541,33 @@ class Module(Base):
             # feat = self.featurize(ex, self.args, False, load_mask=True, load_frames=True)
 
             # Evaluate low level actions.
-            label = ' '.join(self.vocab['action_low'].index2word(feat['action_low'].tolist()))
-            pred = ' '.join(self.vocab['action_low'].index2word(preds[key]['action_low']))
+            label_actions = self.vocab['action_low'].index2word(feat['action_low'].tolist())
+            label_actions_no_stop = [ac for ac in label_actions if ac != '<<stop>>' and ac != '<<pad>>']
+            assert label_actions_no_stop == [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
+            pred_actions = preds[key]['action_low_names']
+            pred_actions_no_stop = [ac for ac in pred_actions if ac != '<<stop>>' and ac != '<<pad>>']
 
-            label_lower = label.lower()
-            pred_lower = pred.lower()
-
-            m['action_low_f1'].append(compute_f1(label_lower, pred_lower))
-            m['action_low_em'].append(compute_exact(label_lower, pred_lower))
-            m['action_low_gold_length'].append(len(label.split()))
-            m['action_low_pred_length'].append(len(pred.split()))
-            m['action_low_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
+            m['action_low_f1'].append(compute_f1(label_actions_no_stop, pred_actions_no_stop))
+            m['action_low_em'].append(compute_exact(label_actions_no_stop, pred_actions_no_stop))
+            m['action_low_gold_length'].append(len(label_actions_no_stop))
+            m['action_low_pred_length'].append(len(pred_actions_no_stop))
+            m['action_low_edit_distance'].append(compute_edit_distance(label_actions_no_stop, pred_actions_no_stop))
 
             # Evaluate high-level controller.
             # Get indexes of predicted transitions.
-            stop_idxs = np.argwhere(np.array(preds[key]['action_low'])[:-1] == self.stop_token).flatten()
+            # self.stop_token is actually an index into the vocabulary
+            stop_idxs = np.argwhere(np.array(preds[key]['action_low_idxs'])[:-1] == self.stop_token).flatten()
             high_idxs = np.append([0], stop_idxs + 1).astype(np.int32)
 
             # Get predicted submodule transitions
             pred_high_idx = np.array(preds[key]['controller_attn'])[high_idxs]
             label_high_idx = feat['module_idxs'][np.nonzero(feat['transition_mask'])]
 
-            pred = ' '.join(self.vocab['high_level'].index2word(pred_high_idx.tolist()))
-            label = ' '.join(self.vocab['high_level'].index2word(label_high_idx.tolist()))
+            m['action_high_f1'].append(compute_f1(label_high_idx, pred_high_idx))
+            m['action_high_em'].append(compute_exact(label_high_idx, pred_high_idx))
 
-            label_lower = label.lower()
-            pred_lower = pred.lower()
-
-            m['action_high_f1'].append(compute_f1(label_lower, pred_lower))
-            m['action_high_em'].append(compute_exact(label_lower, pred_lower))
-
-            m['action_high_gold_length'].append(len(label.split()))
-            m['action_high_pred_length'].append(len(pred.split()))
-            m['action_high_edit_distance'].append(compute_edit_distance(label_lower, pred_lower))
+            m['action_high_gold_length'].append(len(label_high_idx))
+            m['action_high_pred_length'].append(len(pred_high_idx))
+            m['action_high_edit_distance'].append(compute_edit_distance(label_high_idx, pred_high_idx))
 
         return {k: sum(v)/len(v) for k, v in m.items()}
