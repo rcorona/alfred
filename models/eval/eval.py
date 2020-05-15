@@ -2,6 +2,7 @@ import json
 import pprint
 import random
 import time
+from datetime import timedelta
 import torch
 import torch.multiprocessing as mp
 from models.nn.resnet import Resnet
@@ -54,8 +55,10 @@ class Eval(object):
         # success and failure lists
         self.create_stats()
 
+        self.args.start_time = time.time()
+
         # set random seed for shuffling
-        random.seed(int(time.time()))
+        random.seed(int(self.args.start_time))
 
     def queue_tasks(self):
         '''
@@ -118,6 +121,8 @@ class Eval(object):
 
         # print goal instr
         print("Task: %s" % (traj_data['turk_annotations']['anns'][r_idx]['task_desc']))
+        current_time = time.time()
+        print("total time elapsed: {}".format(timedelta(seconds=current_time-args.start_time)))
 
         # setup task for reward
         env.set_task(traj_data, args, reward_type=reward_type)
