@@ -71,6 +71,9 @@ class Eval(object):
         if self.args.fast_epoch:
             files = files[:16]
 
+        if self.args.instance_limit is not None:
+            files = files[:self.args.instance_limit]
+
         if self.args.shuffle:
             random.shuffle(files)
         for traj in files:
