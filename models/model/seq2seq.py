@@ -72,6 +72,8 @@ class Module(BaseModule):
             goal = ''.join(['[SEP]'] + ex['ann']['goal'][:-1] + ['[SEP]'])
             instr = ''.join(['[CLS]'] + [word for desc in ex['ann']['instr'] for word in desc])
 
+            # TODO: tokenizer.encode already appends [CLS] and [SEP]
+
             # Run them through tokenizer and concatenate. 
             goal = cls.tokenizer.encode(goal)
             instr = cls.tokenizer.encode(instr)
@@ -144,20 +146,41 @@ class Module(BaseModule):
         # goal and instr language. 
         lang_goal, lang_instr = cls.post_process_lang(ex, args)
 
+        goal, instr = ex['num']['lang_goal'], ex['num']['lang_instr']
         # zero inputs if specified
         lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
         lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
         lang_model = vars(args).get("lang_model", "default")
 
+        get_mask = 'lang_instr_subgoal_mask' in ex['num']
+
+        # TODO: implement mask expansion for BERT
+        if get_mask:
+            if lang_model == 'bert':
+                raise NotImplementedError("TODO: add mask expansion to BERT")
+            assert len(lang_goal) == len(ex['num']['lang_goal']) and len(lang_instr) == len(ex['num']['lang_instr'])
+
+            # TODO: consider changing this to True?
+            lang_goal_mask = [False] * len(lang_goal)
+            lang_instr_mask = ex['num']['lang_instr_subgoal_mask']
+            assert len(lang_instr_mask) == len(lang_instr)
+
         # append goal + instr
         if lang_model == 'default':
             lang_goal_instr = lang_goal + lang_instr
+            if get_mask:
+                lang_goal_instr_mask = lang_goal_mask + lang_instr_mask
         elif lang_model == 'bert':
             lang_goal_instr = lang_instr + lang_goal
+            if get_mask:
+                lang_goal_instr_mask = lang_instr_mask + lang_goal_mask
 
         feat['lang_goal_instr'] = lang_goal_instr
         feat['lang_goal_instr_len'] = len(lang_goal_instr)
+        if get_mask:
+            feat['lang_instr_subgoal_mask'] = lang_instr_mask
+            feat['lang_goal_instr_subgoal_mask'] = lang_goal_instr_mask
 
         # load Resnet features from disk
         if load_frames and not test_mode:

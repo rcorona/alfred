@@ -199,8 +199,9 @@ class Module(Base):
     def serialize_lang_action(cls, feat, test_mode):
         '''
         append segmented instr language and low-level actions into single sequences
-        ''' 
-        try: 
+        '''
+        try:
+            # TODO: process lang_instr_subgoal_mask, see base.py
             is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
             if not is_serialized:
                 feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]

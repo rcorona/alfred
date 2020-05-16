@@ -26,6 +26,7 @@ def add_data_args(parser):
     parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
 
     parser.add_argument('--train_on_subtrajectories', action='store_true', help='chop up full trajectories and instructions into subtrajectories')
+    parser.add_argument('--train_on_subtrajectories_full_instructions', action='store_true', help='chop up full trajectories into subtrajectories, but keep the full instructions')
 
     # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')

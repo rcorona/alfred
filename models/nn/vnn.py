@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 import pdb
 
+BIG_NEG = -1e9
+
 class SelfAttn(nn.Module):
     '''
     self-attention with learnable parameters
@@ -25,12 +27,17 @@ class DotAttn(nn.Module):
         super(DotAttn, self).__init__()
         self.raw_score = None
 
-    def forward(self, inp, h):
-        score = self.softmax(inp, h)
+    def forward(self, inp, h, mask=None):
+        # mask: bool tensor, with False for locations that should *not* be attended to
+        score = self.softmax(inp, h, mask)
         return score.expand_as(inp).mul(inp).sum(1), score
 
-    def softmax(self, inp, h):
+    def softmax(self, inp, h, mask):
         raw_score = inp.bmm(h.unsqueeze(2))
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+            assert mask.size() == raw_score.size(), (mask.size(), raw_score.size())
+            raw_score.masked_fill_(~mask, BIG_NEG)
         self.raw_score = raw_score
         score = F.softmax(raw_score, dim=1)
         return score
@@ -130,7 +137,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -139,7 +146,9 @@ class ConvFrameMaskDecoder(nn.Module):
         lang_feat_t = enc # language is encoded once at the start
 
         # attend over language
-        weighted_lang_t, lang_attn_t = self.attn(self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1))
+        weighted_lang_t, lang_attn_t = self.attn(
+            self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1), mask=encoder_mask,
+        )
 
         # concat visual feats, weight lang, and previous action embedding
         inp_t = torch.cat([vis_feat_t, weighted_lang_t, e_t], dim=1)
@@ -158,7 +167,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -169,10 +178,14 @@ class ConvFrameMaskDecoder(nn.Module):
         attn_scores = []
         for t in range(max_t):
             try: 
-                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+                action_t, mask_t, state_t, attn_score_t = self.step(
+                    enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+                )
             except: 
                 #pdb.set_trace()
-                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, -1], e_t, state_t)
+                action_t, mask_t, state_t, attn_score_t = self.step(
+                    enc, frames[:, -1], e_t, state_t, encoder_mask=encoder_mask
+                )
 
             masks.append(mask_t)
             actions.append(action_t)
@@ -390,7 +403,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -399,7 +412,9 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         lang_feat_t = enc # language is encoded once at the start
 
         # attend over language
-        weighted_lang_t, lang_attn_t = self.attn(self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1))
+        weighted_lang_t, lang_attn_t = self.attn(
+            self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1), mask=encoder_mask
+        )
 
         # concat visual feats, weight lang, and previous action embedding
         inp_t = torch.cat([vis_feat_t, weighted_lang_t, e_t], dim=1)
@@ -422,7 +437,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t, subgoal_t, progress_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -434,7 +449,9 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         subgoals = []
         progresses = []
         for t in range(max_t):
-            action_t, mask_t, state_t, attn_score_t, subgoal_t, progress_t = self.step(enc, frames[:, t], e_t, state_t)
+            action_t, mask_t, state_t, attn_score_t, subgoal_t, progress_t = self.step(
+                enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+            )
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)

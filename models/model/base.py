@@ -229,7 +229,7 @@ class AlfredDataset(Dataset):
         return [data]
 
     @staticmethod
-    def filter_subgoal_index(data, subgoal_index, add_stop_in_subtrajectories=True):
+    def filter_subgoal_index(data, subgoal_index, add_stop_in_subtrajectories=True, filter_instructions=True):
         '''
         Split a loaded json to only contain the subtrajectory specified by subgoal_index
         if add_stop_in_subtrajectories, then add a NoOp high-level action, with a <<stop>> low-level action, a copy of the last image, and the <<stop>> instruction
@@ -260,16 +260,26 @@ class AlfredDataset(Dataset):
 
         # Filter language instructions.
         data_cp['num'] = data_cp['num'].copy()
-        data_cp['num']['lang_instr'] = [
-            instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
-            if a[0]['high_idx'] == subgoal_index
-        ]
-        if add_stop_in_subtrajectories:
-            # pull <<stop>> from the end of the original instruction
-            assert len(data['num']['lang_instr'][-1]) == 1
-            data_cp['num']['lang_instr'].append(
-                data['num']['lang_instr'][-1]
-            )
+        if filter_instructions:
+            data_cp['num']['lang_instr'] = [
+                instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
+                if a[0]['high_idx'] == subgoal_index
+            ]
+            if add_stop_in_subtrajectories:
+                # pull <<stop>> from the end of the original instruction
+                assert len(data['num']['lang_instr'][-1]) == 1
+                data_cp['num']['lang_instr'].append(
+                    data['num']['lang_instr'][-1]
+                )
+            data_cp['num']['lang_instr_subgoal_mask'] = [
+                np.full((len(instr),), 1, dtype=np.bool)
+                for instr in data_cp['num']['lang_instr']
+            ]
+        else:
+            data_cp['num']['lang_instr_subgoal_mask'] = [
+                np.full((len(instr),), 1 if a[0]['high_idx'] == subgoal_index else 0, dtype=np.bool)
+                for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
+            ]
 
         # Filter low level actions.
         data_cp['plan'] = data_cp['plan'].copy()
@@ -385,14 +395,12 @@ class AlfredDataset(Dataset):
                 seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
                 feat[k] = pad_seq
-            elif k in {'instr_chunk_labels'}:
-                # from Chunker
-                seqs = [torch.tensor(vv, dtype=torch.long) for vv in v]
-                pad_seq = pad_sequence(pad_sequence(seqs, batch_first=True, padding_value=0))
-                seq_lengths = np.array(list(map(len, v)))
-                feat[k] = (pad_seq, seq_lengths)
             elif k in {'lang_goal_instr_len', 'lang_instr_len'}:
                 feat[k] = torch.tensor(v, dtype=torch.long)
+            elif k in {'lang_instr_subgoal_mask'}:
+                seqs = [torch.tensor(vv, dtype=torch.bool) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=False)
+                feat[k] = pad_seq
             else:
                 # default: tensorize and pad sequence
                 seqs = [tensorize(vv, k) for vv in v]
@@ -402,7 +410,9 @@ class AlfredDataset(Dataset):
         return (batch, feat)
 
 class AlfredSubtrajectoryDataset(AlfredDataset):
-    def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None, add_stop_in_subtrajectories=True):
+    def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None,
+                 add_stop_in_subtrajectories=True,
+                 filter_instructions=True):
         """
         :param args:
         :param data:
@@ -415,6 +425,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
         self.subgoal_names = subgoal_names
         self._task_and_indices = []
         self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
+        self.filter_instructions = filter_instructions
 
         if len(data) > 1000:
             iter = tqdm.tqdm(data, ncols=80, desc='dataset: getting subgoals')
@@ -432,7 +443,10 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
     def __getitem__(self, idx):
         task, subgoal_index = self._task_and_indices[idx]
         task = AlfredDataset.filter_subgoal_index(
-            task, subgoal_index, add_stop_in_subtrajectories=self.add_stop_in_subtrajectories
+            task,
+            subgoal_index,
+            add_stop_in_subtrajectories=self.add_stop_in_subtrajectories,
+            filter_instructions=self.filter_instructions
         )
 
         # Create dict of features from dict.
@@ -457,6 +471,15 @@ class BaseModule(nn.Module):
         if not is_serialized:
             feat['num']['sub_instr_lengths'] = [len(desc) for desc in feat['num']['lang_instr']]
             feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
+            if 'lang_instr_subgoal_mask' in feat['num']:
+                # currently this is only added by the subtrajectory dataset
+                mask = [x for xs in feat['num']['lang_instr_subgoal_mask'] for x in xs]
+                feat['num']['lang_instr_subgoal_mask'] = mask
+                # check types
+                # took these out because the goal is prepended
+                # assert mask[0] == False or mask[0] == True
+                # feat['num']['lang_instr_subgoal_start'] = mask.index(True)
+                # feat['num']['lang_instr_subgoal_end'] = len(mask)-1 - mask[::-1].index(True)
         if not test_mode:
             feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
 
@@ -600,12 +623,17 @@ class BaseModule(nn.Module):
         train_subset = train_subset[::20]
 
         # this isn't implemented for instruction_chunker
-        if hasattr(args, 'train_on_subtrajectories') and args.train_on_subtrajectories:
+        if vars(args).get('train_on_subtrajectories', False) or vars(args).get('train_on_subtrajectories_full_instructions', False):
             if args.subgoal:
                 subgoal_names = {args.subgoal}
             else:
                 subgoal_names = None
-            dataset_constructor = lambda tasks: AlfredSubtrajectoryDataset(args, tasks, self.__class__, False, subgoal_names=subgoal_names)
+
+            full_instructions = vars(args).get('train_on_subtrajectories_full_instructions', False)
+            dataset_constructor = lambda tasks: AlfredSubtrajectoryDataset(
+                args, tasks, self.__class__, False, subgoal_names=subgoal_names,
+                filter_instructions = not full_instructions
+            )
         else:
             dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
 

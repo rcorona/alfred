@@ -83,11 +83,13 @@ class Module(Base):
     def forward(self, feat, max_decode=300):
         if self.args.gpu:
             move_dict_to_cuda(feat)
-        cont_lang, enc_lang = self.encode_lang(feat)
+        cont_lang, enc_lang, enc_mask = self.encode_lang(feat)
 
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
+        res = self.dec(
+            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, encoder_mask=enc_mask
+        )
         feat.update(res)
         return feat
 
@@ -96,10 +98,12 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
+        # TODO: consider masking enc_att so that cont_lang_goal_instr is only over the sub-instruction
         enc_lang_goal_instr = self.encode_lang_base(feat)
         cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+        encoder_mask = feat.get('lang_goal_instr_subgoal_mask', None)
 
-        return cont_lang_goal_instr, enc_lang_goal_instr
+        return cont_lang_goal_instr, enc_lang_goal_instr, encoder_mask
 
 
     def reset(self):
@@ -120,7 +124,7 @@ class Module(Base):
 
         # encode language features
         if self.r_state['cont_lang'] is None and self.r_state['enc_lang'] is None:
-            self.r_state['cont_lang'], self.r_state['enc_lang'] = self.encode_lang(feat)
+            self.r_state['cont_lang'], self.r_state['enc_lang'], self.r_state['enc_mask'] = self.encode_lang(feat)
 
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
@@ -131,7 +135,10 @@ class Module(Base):
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
 
         # decode and save embedding and hidden states
-        out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'])
+        out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(
+            self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'],
+            encoder_mask=self.r_state['enc_mask'],
+        )
 
         # save states
         self.r_state['state_t'] = state_t
