@@ -165,7 +165,8 @@ class EvalSubgoals(Eval):
             # subgoal evaluation
             else:
                 if args.subgoals_length_constrained:
-                    allow_stop = (len(pred_actions) == len(expert_true_actions) - 1)
+                    # expert true actions do not include <<stop>>
+                    allow_stop = (len(pred_actions) == len(expert_true_actions))
                     must_stop = allow_stop
                 else:
                     allow_stop = True
@@ -231,6 +232,8 @@ class EvalSubgoals(Eval):
 
                 # terminal tokens predicted
                 if is_terminal:
+                    if args.subgoals_length_constrained:
+                        assert len(pred_actions) == len(expert_true_actions)
                     print("predicted %s" % action)
                     break
 
