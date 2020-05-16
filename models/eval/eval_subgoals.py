@@ -37,6 +37,9 @@ class EvalSubgoals(Eval):
             successes[sg] = list()
             failures[sg] = list()
 
+        full_instructions = args.trained_on_subtrajectories_full_instructions
+        assert full_instructions == vars(model.args).get('train_on_subtrajectories_full_instructions', False)
+
         while True:
             if task_queue.qsize() == 0:
                 break
@@ -63,10 +66,11 @@ class EvalSubgoals(Eval):
                         subgoal_filtered_traj_data = filtered_traj_by_subgoal[subgoal]
                     else:
                         subgoal_filtered_traj_data = None
-                    if args.trained_on_subtrajectories:
+                    if args.trained_on_subtrajectories or args.trained_on_subtrajectories_full_instructions:
                         assert not subgoal_filtered_traj_data
                         subgoal_filtered_traj_data = AlfredDataset.filter_subgoal_index(
-                            traj, eval_idx, add_stop_in_subtrajectories=True
+                            traj, eval_idx, add_stop_in_subtrajectories=True,
+                            filter_instructions=not args.trained_on_subtrajectories_full_instructions
                         )
                     cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:

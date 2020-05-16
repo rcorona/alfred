@@ -47,8 +47,11 @@ if __name__ == '__main__':
     parser.add_argument('--no_teacher_force_unroll_with_expert', action='store_true', help='no teacher forcing with expert')
 
     parser.add_argument('--modular_subgoals', action='store_true', help='this model was trained with the --subgoal argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
-    parser.add_argument('--trained_on_subtrajectories', action='store_true', help='this model was trained with the --train_on_subtrajectories argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
     parser.add_argument('--oracle', action='store_true', help='Use oracle for high-level controller.')
+
+    # TODO: just read these from the model arguments, possibly setting --skip_model_unroll_with_expert
+    parser.add_argument('--trained_on_subtrajectories', action='store_true', help='this model was trained with the --train_on_subtrajectories argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+    parser.add_argument('--trained_on_subtrajectories_full_instructions', action='store_true', help='this model was trained with the --train_on_subtrajectories_full_instructions argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
 
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')
@@ -62,6 +65,10 @@ if __name__ == '__main__':
 
     if args.print_git:
         print_git_info()
+
+    if args.trained_on_subtrajectories or args.trained_on_subtrajectories_full_instructions:
+        if args.eval_type != 'subgoals':
+            raise NotImplementedError("subtrajectory training and non-subgoal evaluation is not implemented")
 
     # eval mode
     if args.eval_type == 'subgoals':

@@ -207,7 +207,8 @@ class AlfredDataset(Dataset):
         return data
 
     @staticmethod
-    def load_task_json(args, task, subgoal=None, split_into_subtrajectories=False, add_stop_in_subtrajectories=True):
+    def load_task_json(args, task, subgoal=None, split_into_subtrajectories=False,
+                       add_stop_in_subtrajectories=True, filter_instructions=True):
         '''
         load preprocessed json from disk
         '''
@@ -221,7 +222,8 @@ class AlfredDataset(Dataset):
             # Will return list of subgoal datapoints.
             subgoal_indices = AlfredDataset.extract_subgoal_indices(data, subgoals_to_keep)
             return [
-                AlfredDataset.filter_subgoal_index(data, subgoal_ix, add_stop_in_subtrajectories)
+                AlfredDataset.filter_subgoal_index(data, subgoal_ix, add_stop_in_subtrajectories,
+                                                   filter_instructions=filter_instructions)
                 for subgoal_ix in sorted(subgoal_indices)
             ]
 
