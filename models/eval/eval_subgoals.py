@@ -233,7 +233,7 @@ class EvalSubgoals(Eval):
                 # terminal tokens predicted
                 if is_terminal:
                     if args.subgoals_length_constrained:
-                        assert len(pred_actions) == len(expert_true_actions)
+                        assert len(pred_actions) == len(expert_true_actions) + 1, (pred_actions, [ac['action'] for ac in expert_true_actions])
                     print("predicted %s" % action)
                     break
 
@@ -261,7 +261,9 @@ class EvalSubgoals(Eval):
 
         gold_actions = [action['action'] for action in expert_true_actions]
 
-        pred_actions_joined = ' '.join(pred_actions).lower()
+        pred_actions_no_stop = [ac for ac in pred_actions if ac != '<<stop>>']
+
+        pred_actions_joined = ' '.join(pred_actions_no_stop).lower()
         gold_actions_joined = ' '.join(gold_actions).lower()
 
         log_entry = {'trial': traj_data['task_id'],
@@ -275,7 +277,7 @@ class EvalSubgoals(Eval):
                      'subgoal_path_len_weight': float(expert_pl),
                      'reward': float(reward),
                      'num_steps': t - len(expert_init_actions) + 1,
-                     'action_low_pred_length': float(len(pred_actions)),
+                     'action_low_pred_length': float(len(pred_actions_no_stop)),
                      'action_low_gold_length': float(len(gold_actions)),
                      'action_low_f1': compute_f1(gold_actions_joined, pred_actions_joined),
                      'action_low_em': compute_exact(gold_actions_joined, pred_actions_joined),
