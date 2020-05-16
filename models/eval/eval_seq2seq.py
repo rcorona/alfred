@@ -53,6 +53,8 @@ if __name__ == '__main__':
     parser.add_argument('--trained_on_subtrajectories', action='store_true', help='this model was trained with the --train_on_subtrajectories argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
     parser.add_argument('--trained_on_subtrajectories_full_instructions', action='store_true', help='this model was trained with the --train_on_subtrajectories_full_instructions argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
 
+    parser.add_argument('--subgoals_length_constrained', action='store_true', help='force the model to decode for exactly the length of the true segment')
+
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--fast_epoch', dest='fast_epoch', action='store_true')

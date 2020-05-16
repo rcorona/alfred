@@ -73,8 +73,8 @@ def main(args):
         splits = json.load(f)
         pprint.pprint({k: len(v) for k, v in splits.items()})
 
-    print("train")
-    check_tasks(args, splits['train'])
+    # print("train")
+    # check_tasks(args, splits['train'])
     print("valid_seen")
     check_tasks(args, splits['valid_seen'])
     print("valid_unseen")

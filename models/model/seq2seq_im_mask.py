@@ -15,6 +15,7 @@ import tqdm
 
 from models.model.base import embed_packed_sequence, move_dict_to_cuda
 
+BIG_NEG = -1e9
 
 class Module(Base):
 
@@ -150,12 +151,16 @@ class Module(Base):
         return feat
 
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False, allow_stop=True):
         '''
         output processing
         '''
+        logits = feat['out_action_low']
+        if not allow_stop:
+            logits = logits.clone()
+            logits[:,:,self.vocab['action_low'].word2index("<<stop>>")] = BIG_NEG
         pred = {}
-        for ex, alow, alow_mask in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask']):
+        for ex, alow, alow_mask in zip(batch, logits.max(2)[1].tolist(), feat['out_action_low_mask']):
             # remove padding tokens
             if self.pad in alow:
                 pad_start_idx = alow.index(self.pad)
