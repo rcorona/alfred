@@ -345,9 +345,10 @@ class EvalSubgoals(Eval):
                    'results': dict(self.results)}
 
         save_path = os.path.dirname(self.args.model_path)
-        save_path = os.path.join(
-            save_path,
-            'subgoal_results_split:{}_{}.json'.format(self.args.eval_split, datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
-        )
+        extra = ''
+        if self.args.subgoals_length_constrained:
+            extra += '_length-constrained'
+        out_path = 'subgoal_results_{}split:{}_{}.json'.format(extra, self.args.eval_split, datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        save_path = os.path.join(save_path, out_path)
         with open(save_path, 'w') as r:
             json.dump(results, r, indent=4, sort_keys=True)
