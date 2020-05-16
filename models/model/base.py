@@ -397,7 +397,7 @@ class AlfredDataset(Dataset):
                 feat[k] = pad_seq
             elif k in {'lang_goal_instr_len', 'lang_instr_len'}:
                 feat[k] = torch.tensor(v, dtype=torch.long)
-            elif k in {'lang_instr_subgoal_mask'}:
+            elif k in {'lang_instr_subgoal_mask', 'lang_goal_instr_subgoal_mask'}:
                 seqs = [torch.tensor(vv, dtype=torch.bool) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=False)
                 feat[k] = pad_seq

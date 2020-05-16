@@ -37,7 +37,8 @@ class DotAttn(nn.Module):
         if mask is not None:
             mask = mask.unsqueeze(-1)
             assert mask.size() == raw_score.size(), (mask.size(), raw_score.size())
-            raw_score.masked_fill_(~mask, BIG_NEG)
+            # ~ not implemented on bool tensors in 1.1
+            raw_score.masked_fill_(~(mask.byte()), BIG_NEG)
         self.raw_score = raw_score
         score = F.softmax(raw_score, dim=1)
         return score
