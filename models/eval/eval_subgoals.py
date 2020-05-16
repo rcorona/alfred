@@ -37,6 +37,9 @@ class EvalSubgoals(Eval):
             successes[sg] = list()
             failures[sg] = list()
 
+        full_instructions = args.trained_on_subtrajectories_full_instructions
+        assert full_instructions == vars(model.args).get('train_on_subtrajectories_full_instructions', False)
+
         while True:
             if task_queue.qsize() == 0:
                 break
@@ -63,10 +66,11 @@ class EvalSubgoals(Eval):
                         subgoal_filtered_traj_data = filtered_traj_by_subgoal[subgoal]
                     else:
                         subgoal_filtered_traj_data = None
-                    if args.trained_on_subtrajectories:
+                    if args.trained_on_subtrajectories or args.trained_on_subtrajectories_full_instructions:
                         assert not subgoal_filtered_traj_data
                         subgoal_filtered_traj_data = AlfredDataset.filter_subgoal_index(
-                            traj, eval_idx, add_stop_in_subtrajectories=True
+                            traj, eval_idx, add_stop_in_subtrajectories=True,
+                            filter_instructions=not args.trained_on_subtrajectories_full_instructions
                         )
                     cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:
@@ -160,17 +164,28 @@ class EvalSubgoals(Eval):
 
             # subgoal evaluation
             else:
+                if args.subgoals_length_constrained:
+                    allow_stop = (len(pred_actions) == len(expert_true_actions) - 1)
+                    must_stop = allow_stop
+                else:
+                    allow_stop = True
+                    must_stop = False
                 # forward model
                 if is_hierarchical:
                     m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle)
                 else:
                     m_out = model.step(feat, prev_action=prev_action)
                 # traj_data is only used to get the keys returned in m_pred
-                m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
+                m_pred = model.extract_preds(
+                    m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True,
+                    allow_stop=allow_stop
+                )
                 m_pred = list(m_pred.values())[0]
 
                 # get action and mask
                 action, mask = m_pred['action_low_names'][0], m_pred['action_low_mask'][0]
+                if must_stop:
+                    action = '<<stop>>'
                 mask = np.squeeze(mask, axis=0) if model.has_interaction(action) else None
 
                 pred_actions.append(action)

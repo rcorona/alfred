@@ -378,11 +378,14 @@ class Module(Base):
 
         return feat
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False, allow_stop=True):
         '''
         output processing
         '''
         pred = {}
+
+        if not allow_stop:
+            raise NotImplementedError("allow_stop=False")
 
         for ex, alow, alow_mask, controller_attn in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask'],
                 feat['out_module_attn_scores'].max(2)[1].tolist()):
