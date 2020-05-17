@@ -409,6 +409,20 @@ class AlfredDataset(Dataset):
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
                 feat[k] = pad_seq
 
+
+        ## due to the segment merging in merge_last_two_low_actions in preprocess.py, in some very rare
+        ## cases, ['action_low'] has more timesteps than frames. There is code various other places (e.g. Decoder.forward())
+        ## to handle this, but it still breaks if we get unlucky and an entire batch consists of these examples,
+        ## as it does with subtrajectories filtered to the SliceGoal subgoal
+        bsz, t = feat['action_low'].size()
+        bsz_, t_, *_ = feat['frames'].size()
+        assert bsz == bsz_
+        while t != t_:
+            feat['frames'] = torch.cat((
+                feat['frames'], feat['frames'][:,-1].unsqueeze(1)
+            ),dim=1)
+            t_ = feat['frames'].size(1)
+
         return (batch, feat)
 
 class AlfredSubtrajectoryDataset(AlfredDataset):
