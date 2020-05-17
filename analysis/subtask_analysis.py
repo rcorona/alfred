@@ -5,6 +5,8 @@ def process_entries(args, entries):
     df = pandas.DataFrame(entries)
 
     for groupby in args.groupby:
+        if ',' in groupby:
+            groupby=list(groupby.split(','))
         print(df.groupby(groupby)[args.metrics].mean())
         print()
 
