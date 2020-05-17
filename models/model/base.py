@@ -414,14 +414,15 @@ class AlfredDataset(Dataset):
         ## cases, ['action_low'] has more timesteps than frames. There is code various other places (e.g. Decoder.forward())
         ## to handle this, but it still breaks if we get unlucky and an entire batch consists of these examples,
         ## as it does with subtrajectories filtered to the SliceGoal subgoal
-        bsz, t = feat['action_low'].size()
-        bsz_, t_, *_ = feat['frames'].size()
-        assert bsz == bsz_
-        while t != t_:
-            feat['frames'] = torch.cat((
-                feat['frames'], feat['frames'][:,-1].unsqueeze(1)
-            ),dim=1)
-            t_ = feat['frames'].size(1)
+        if 'action_low' in feat:
+            bsz, t = feat['action_low'].size()
+            bsz_, t_, *_ = feat['frames'].size()
+            assert bsz == bsz_
+            while t != t_:
+                feat['frames'] = torch.cat((
+                    feat['frames'], feat['frames'][:,-1].unsqueeze(1)
+                ),dim=1)
+                t_ = feat['frames'].size(1)
 
         return (batch, feat)
 
@@ -458,12 +459,14 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
 
     def __getitem__(self, idx):
         task, subgoal_index = self._task_and_indices[idx]
+        old_task = json.dumps(task)
         task = AlfredDataset.filter_subgoal_index(
             task,
             subgoal_index,
             add_stop_in_subtrajectories=self.add_stop_in_subtrajectories,
             filter_instructions=self.filter_instructions
         )
+        assert json.dumps(self._task_and_indices[idx][0]) == old_task
 
         # Create dict of features from dict.
         if self.featurize:

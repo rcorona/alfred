@@ -59,8 +59,16 @@ class EvalSubgoals(Eval):
                 else:
                     filtered_traj_by_subgoal = None
                 r_idx = task['repeat_idx']
+
+                high_indices_with_actions = set()
+                for actions in task_data['num']['action_low']:
+                    for action in actions:
+                        high_indices_with_actions.add(action['high_idx'])
+
                 subgoals_and_idxs = [(sg['discrete_action']['action'], sg['high_idx']) for sg in traj['plan']['high_pddl'] if sg['discrete_action']['action'] in subgoals_to_evaluate]
                 for subgoal, eval_idx in subgoals_and_idxs:
+                    if eval_idx not in high_indices_with_actions:
+                        continue
                     print("No. of trajectories left: %d" % (task_queue.qsize()))
                     if filtered_traj_by_subgoal is not None:
                         subgoal_filtered_traj_data = filtered_traj_by_subgoal[subgoal]
