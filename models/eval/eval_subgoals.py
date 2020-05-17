@@ -61,7 +61,7 @@ class EvalSubgoals(Eval):
                 r_idx = task['repeat_idx']
 
                 high_indices_with_actions = set()
-                for actions in task_data['num']['action_low']:
+                for actions in traj['num']['action_low']:
                     for action in actions:
                         high_indices_with_actions.add(action['high_idx'])
 
