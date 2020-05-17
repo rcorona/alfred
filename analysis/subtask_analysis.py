@@ -7,7 +7,13 @@ def process_entries(args, entries):
     for groupby in args.groupby:
         if ',' in groupby:
             groupby=list(groupby.split(','))
-        print(df.groupby(groupby)[args.metrics].mean())
+        gb = df.groupby(groupby)
+        print(gb[args.metrics[0]].count())
+        for key,row in gb[args.metrics].mean().iterrows():
+            if isinstance(key,tuple):
+                print(','.join(map(str,key)) + ',' + str(row[0]))
+            else:
+                print('{},{}'.format(key,row[0]))
         print()
 
 
