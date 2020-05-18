@@ -49,15 +49,18 @@ class Dataset(object):
                     ex = json.load(f)
 
                 r_idx = task['repeat_idx'] # Index for the task in traj
+                traj = ex.copy()
                 if not task['task'] in full_dict.keys():
                     full_dict[task['task']] = {
                         'high_level': [],
                         'low_level': []
 
                     }
+                 ann_high = revtok.tokenize(remove_spaces_and_lower(ex['turk_annotations']['anns'][r_idx]['task_desc'])) + ['<<goal>>']
+                 ann_low = [revtok.tokenize(remove_spaces_and_lower(x)) for x in ex['turk_annotations']['anns'][r_idx]['high_descs']] + [['<<stop>>']]
 
-                full_dict[task['task']]['high_level'].append(revtok.tokenize(remove_spaces_and_lower(ex['turk_annotations']['anns'][r_idx]['task_desc'])) + ['<<goal>>'])
-                full_dict[task['task']]['low_level'].append([revtok.tokenize(remove_spaces_and_lower(x)) for x in ex['turk_annotations']['anns'][r_idx]['high_descs']] + [['<<stop>>']])
+                full_dict[task['task']]['high_level'].append(self.numericalize(self.vocab['word'], ann_high, train=True))
+                full_dict[task['task']]['low_level'].append([self.numericalize(self.vocab['word'], x, train=True) for x in ann_low])
 
 
         complete = os.path.join(self.args.data, 'all_data.json')
