@@ -740,7 +740,6 @@ class BaseModule(nn.Module):
                     if vars(args).get('lang_model', '') == 'bert':
                         bert_optim.step()
                         bert_scheduler.step()
-                        print('***************{}***************'.format(bert_optim.param_groups[0]['lr']))
 
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()

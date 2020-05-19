@@ -61,7 +61,13 @@ class Module(Base):
         self.subgoal_monitoring = (self.args.pm_aux_loss_wt > 0 or self.args.subgoal_aux_loss_wt > 0)
 
         # frame mask decoder
-        decoder = vnn.ConvFrameMaskDecoderProgressMonitor if self.subgoal_monitoring else vnn.ConvFrameMaskDecoderModular
+        if self.subgoal_monitoring:
+            decoder = vnn.ConvFrameMaskDecoderProgressMonitor
+            
+        elif args.indep_modules:
+            decoder = vnn.ConvFrameMaskDecoderModularIndependent
+        else:
+            decoder = vnn.ConvFrameMaskDecoderModular
         self.dec = decoder(self.emb_action_low, args.dframe, 2*args.dhid,
                            pframe=args.pframe,
                            attn_dropout=args.attn_dropout,
@@ -191,7 +197,7 @@ class Module(Base):
             feat['action_low_valid_interact'] = np.insert(feat['action_low_valid_interact'], transition_idxs, 0)
 
             # Get transition mask for training attention mechanism with STOP action in mind.
-            feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True)
+            feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True) 
 
         return feat
 
