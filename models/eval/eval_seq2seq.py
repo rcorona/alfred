@@ -31,6 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--shuffle', dest='shuffle', action='store_true')
     parser.add_argument('--gpu', dest='gpu', action='store_true')
     parser.add_argument('--num_threads', type=int, default=1)
+    parser.add_argument('--indep-modules', help='uses independent submodules that keep their own hidden state', action='store_true')
+
 
     # eval params
     parser.add_argument('--max_steps', type=int, default=500, help='max steps before episode termination')
