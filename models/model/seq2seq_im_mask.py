@@ -1,4 +1,5 @@
 import os
+
 import torch
 import numpy as np
 import nn.vnn as vnn
@@ -7,13 +8,14 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
-from models.utils.metric import compute_f1, compute_exact
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
 import tqdm
 
 from models.model.base import embed_packed_sequence, move_dict_to_cuda
 
+BIG_NEG = -1e9
 
 class Module(Base):
 
@@ -82,11 +84,13 @@ class Module(Base):
     def forward(self, feat, max_decode=300):
         if self.args.gpu:
             move_dict_to_cuda(feat)
-        cont_lang, enc_lang = self.encode_lang(feat)
+        cont_lang, enc_lang, enc_mask = self.encode_lang(feat)
 
         state_0 = cont_lang, torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
+        res = self.dec(
+            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, encoder_mask=enc_mask
+        )
         feat.update(res)
         return feat
 
@@ -95,10 +99,12 @@ class Module(Base):
         '''
         encode goal+instr language
         '''
+        # TODO: consider masking enc_att so that cont_lang_goal_instr is only over the sub-instruction
         enc_lang_goal_instr = self.encode_lang_base(feat)
         cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+        encoder_mask = feat.get('lang_goal_instr_subgoal_mask', None)
 
-        return cont_lang_goal_instr, enc_lang_goal_instr
+        return cont_lang_goal_instr, enc_lang_goal_instr, encoder_mask
 
 
     def reset(self):
@@ -119,7 +125,7 @@ class Module(Base):
 
         # encode language features
         if self.r_state['cont_lang'] is None and self.r_state['enc_lang'] is None:
-            self.r_state['cont_lang'], self.r_state['enc_lang'] = self.encode_lang(feat)
+            self.r_state['cont_lang'], self.r_state['enc_lang'], self.r_state['enc_mask'] = self.encode_lang(feat)
 
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
@@ -130,7 +136,10 @@ class Module(Base):
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
 
         # decode and save embedding and hidden states
-        out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'])
+        out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(
+            self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'],
+            encoder_mask=self.r_state['enc_mask'],
+        )
 
         # save states
         self.r_state['state_t'] = state_t
@@ -142,12 +151,16 @@ class Module(Base):
         return feat
 
 
-    def extract_preds(self, out, batch, feat, clean_special_tokens=True):
+    def extract_preds(self, out, batch, feat, clean_special_tokens=True, return_masks=False, allow_stop=True):
         '''
         output processing
         '''
+        logits = feat['out_action_low']
+        if not allow_stop:
+            logits = logits.clone()
+            logits[:,:,self.vocab['action_low'].word2index("<<stop>>")] = BIG_NEG
         pred = {}
-        for ex, alow, alow_mask in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask']):
+        for ex, alow, alow_mask in zip(batch, logits.max(2)[1].tolist(), feat['out_action_low_mask']):
             # remove padding tokens
             if self.pad in alow:
                 pad_start_idx = alow.index(self.pad)
@@ -165,19 +178,19 @@ class Module(Base):
             words = self.vocab['action_low'].index2word(alow)
 
             # sigmoid preds to binary mask
-            # alow_mask = F.sigmoid(alow_mask)
-            # p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
+            alow_mask = F.sigmoid(alow_mask)
+            p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            key = (ex['task_id'], ex['repeat_idx'])
-
+            key = self.get_instance_key(ex)
             assert key not in pred
 
             # print(len(p_mask))
 
             pred[key] = {
-                'action_low': ' '.join(words),
-                # 'action_low_mask': p_mask,
+                'action_low_names': words,
             }
+            if return_masks:
+                pred[key]['action_low_mask'] = p_mask
 
         return pred
 
@@ -274,9 +287,12 @@ class Module(Base):
         '''
         m = collections.defaultdict(list)
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='compute_metric'):
-            # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            key = (ex['task_id'], ex['repeat_idx'])
-            label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
+            key = self.get_instance_key(ex)
+            label_actions = [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
+            pred_actions = preds[key]['action_low_names']
+            m['action_low_f1'].append(compute_f1(label_actions, pred_actions))
+            m['action_low_em'].append(compute_exact(label_actions, pred_actions))
+            m['action_low_gold_length'].append(len(label_actions))
+            m['action_low_pred_length'].append(len(pred_actions))
+            m['action_low_edit_distance'].append(compute_edit_distance(label_actions, pred_actions))
         return {k: sum(v)/len(v) for k, v in m.items()}

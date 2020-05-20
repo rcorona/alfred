@@ -1,3 +1,4 @@
+import numpy as np
 import re
 import string
 import collections
@@ -34,12 +35,18 @@ def get_tokens(s):
 
 def compute_exact(a_gold, a_pred):
     #pdb.set_trace()
-    return int(normalize_answer(a_gold) == normalize_answer(a_pred))
+    # return int(normalize_answer(a_gold) == normalize_answer(a_pred))
+    if len(a_gold) != len(a_pred):
+        return 0.0
+    for g, p in zip(a_gold, a_pred):
+        if g != p:
+            return 0
+    return 1
 
 
-def compute_f1(a_gold, a_pred):
-    gold_toks = get_tokens(a_gold)
-    pred_toks = get_tokens(a_pred)
+def compute_f1(gold_toks, pred_toks):
+    # gold_toks = get_tokens(a_gold)
+    # pred_toks = get_tokens(a_pred)
     common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
     num_same = sum(common.values())
     if len(gold_toks) == 0 or len(pred_toks) == 0:
@@ -52,7 +59,7 @@ def compute_f1(a_gold, a_pred):
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
 
-def compute_edit_distance(a_gold, a_pred):
-    gold_toks = get_tokens(a_gold)
-    pred_toks = get_tokens(a_pred)
+def compute_edit_distance(gold_toks, pred_toks):
+    # gold_toks = get_tokens(a_gold)
+    # pred_toks = get_tokens(a_pred)
     return editdistance.eval(gold_toks, pred_toks)

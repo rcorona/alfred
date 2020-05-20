@@ -5,9 +5,17 @@ def process_entries(args, entries):
     df = pandas.DataFrame(entries)
 
     for groupby in args.groupby:
-        print(df.groupby(groupby)[args.metrics].mean())
+        #print(df.groupby(groupby)[args.metrics].mean())
+        if ',' in groupby:
+            groupby=list(groupby.split(','))
+        gb = df.groupby(groupby)
+        print(gb[args.metrics[0]].count())
+        for key,row in gb[args.metrics].mean().iterrows():
+            if isinstance(key,tuple):
+                print(','.join(map(str,key)) + ',' + str(row[0]))
+            else:
+                print('{},{}'.format(key,row[0]))
         print()
-
 
 def main(args):
     fname = args.subgoal_result_file

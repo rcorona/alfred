@@ -9,6 +9,8 @@ import copy
 from copy import deepcopy
 import math
 
+from typing import Set
+
 import numpy as np
 import torch
 import tqdm
@@ -24,6 +26,9 @@ from pytorch_transformers import WarmupConstantSchedule
 from collections.abc import MutableMapping
 
 # data utilities
+from models.utils.helper_utils import safe_zip
+
+
 def embed_packed_sequence(embeddings: nn.Embedding, packed_sequence: PackedSequence):
     
     return PackedSequence(embeddings(packed_sequence.data),
@@ -154,17 +159,194 @@ class AdamW(Optimizer):
         return loss
 
 class AlfredDataset(Dataset):
+    @staticmethod
+    def extract_subgoal_indices(task_data, subgoal_names: Set[str]=None, keep_noop=False):
+        """
+        :param data:
+        :param subgoal_names: if None, return all subgoals
+        :param keep_noop:
+        :return:
+        """
+        valid_idx = set()
+
+        high_indices_with_actions = set()
+        for actions in task_data['num']['action_low']:
+            for action in actions:
+                high_indices_with_actions.add(action['high_idx'])
+
+        for subgoal in task_data['plan']['high_pddl']:
+
+            curr_subgoal = subgoal['discrete_action']['action']
+
+            if curr_subgoal == 'NoOp' and not keep_noop:
+                continue
+
+
+            # Keep the subgoal we're looking for.
+            if subgoal_names is None or curr_subgoal in subgoal_names:
+                high_idx = subgoal['high_idx']
+                if high_idx in high_indices_with_actions:
+                    valid_idx.add(high_idx)
+
+            # TODO: this wasn't being used
+            # As well as the final NoOp operation, we will copy this to the end of every subgoal example.
+            # elif curr_subgoal == 'NoOp':
+            #     noop_idx = subgoal['high_idx']
+        return valid_idx
+
+    @staticmethod
+    def load_task_json_unsplit(args, task):
+        # TODO: unuglify this
+        json_path = os.path.join(args.data, task['task'], '%s' % args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        with open(json_path) as f:
+            data = json.load(f)
+
+        data['repeat_idx'] = task['repeat_idx']
+        # None means this contains all subgoals; will be set in copies if filter_subgoal_index is called
+        data['subgoal_idx'] = None
+        return data
+
+    @staticmethod
+    def load_task_json(args, task, subgoal=None, split_into_subtrajectories=False,
+                       add_stop_in_subtrajectories=True, filter_instructions=True):
+        '''
+        load preprocessed json from disk
+        '''
+        data = AlfredDataset.load_task_json_unsplit(args, task)
+
+        if subgoal is not None or split_into_subtrajectories:
+            if subgoal is not None:
+                subgoals_to_keep = {subgoal}
+            else:
+                subgoals_to_keep = None # means keep all
+            # Will return list of subgoal datapoints.
+            subgoal_indices = AlfredDataset.extract_subgoal_indices(data, subgoals_to_keep)
+            return [
+                AlfredDataset.filter_subgoal_index(data, subgoal_ix, add_stop_in_subtrajectories,
+                                                   filter_instructions=filter_instructions)
+                for subgoal_ix in sorted(subgoal_indices)
+            ]
+
+        # Otherwise return list with singleton item.
+        return [data]
+
+    @staticmethod
+    def filter_subgoal_index(data, subgoal_index, add_stop_in_subtrajectories=True, filter_instructions=True):
+        '''
+        Split a loaded json to only contain the subtrajectory specified by subgoal_index
+        if add_stop_in_subtrajectories, then add a NoOp high-level action, with a <<stop>> low-level action, a copy of the last image, and the <<stop>> instruction
+        '''
+
+        # Use for counting dataset examples.
+        #self.subgoal_count += len(valid_idx) - 1
+        #self.trajectories_count += 1
+        #for subgoal in data['plan']['high_pddl']: self.subgoal_set.add(subgoal['discrete_action']['action'])
+        #return
+
+        # Create an example from each instance of the subgoal.
+        examples = []
+
+        # this fails on the training data
+        # for ix, act_low in enumerate(data['num']['action_low']):
+        #     for act in act_low:
+        #         assert act['high_idx'] == ix
+
+        # this is true for <10 trials in the training data
+        # if len(data['plan']['high_pddl']) != len(data['num']['lang_instr']):
+        #     print("number of language instructions doesn't match number of high indices in {}: {} != {}".format(
+        #         data['task_id'], len(data['num']['lang_instr']), len(data['plan']['high_pddl'])))
+
+        # Copy data to make individual example.
+        # data_cp = deepcopy(data)
+        data_cp = data.copy()
+
+        # Filter language instructions.
+        data_cp['num'] = data_cp['num'].copy()
+        if filter_instructions:
+            data_cp['num']['lang_instr'] = [
+                instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
+                if a[0]['high_idx'] == subgoal_index
+            ]
+            if add_stop_in_subtrajectories:
+                # pull <<stop>> from the end of the original instruction
+                assert len(data['num']['lang_instr'][-1]) == 1
+                data_cp['num']['lang_instr'].append(
+                    data['num']['lang_instr'][-1]
+                )
+            data_cp['num']['lang_instr_subgoal_mask'] = [
+                np.full((len(instr),), 1, dtype=np.bool)
+                for instr in data_cp['num']['lang_instr']
+            ]
+        else:
+            data_cp['num']['lang_instr_subgoal_mask'] = [
+                np.full((len(instr),), 1 if a[0]['high_idx'] == subgoal_index else 0, dtype=np.bool)
+                for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
+            ]
+
+        # Filter low level actions.
+        data_cp['plan'] = data_cp['plan'].copy()
+        data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == subgoal_index]
+
+        # Filter images.
+        data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == subgoal_index]
+
+        # Fix image idx.
+        low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
+        new_images = []
+        for img in data_cp['images']:
+            img = img.copy()
+            img['low_idx'] = low_idxs.index(img['low_idx'])
+            new_images.append(img)
+        if add_stop_in_subtrajectories:
+            new_images.append(img)
+        data_cp['images'] = new_images
+
+        # TODO: handle ['num']['low_to_high_idx'], for progress monitors
+
+        # Filter action-low.
+        # for i in range(len(data_cp['num']['action_low'])):
+        #     data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
+        data_cp['num']['action_low'] = [
+            [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == subgoal_index]
+            for i in range(len(data_cp['num']['action_low']))
+        ]
+        data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
+
+        # assert len(data_cp['num']['action_low']) <= 1
+
+        # if not len(data_cp['num']['action_low']) == 1:
+        #     continue
+
+        assert(len(data_cp['num']['action_low']) == 1)
+
+        # old non-functional form
+        # Extend low-level actions with stop action.
+        # data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
+
+        # old form that concatenates stop, rather than adding as a separate subtrajectory
+        # if add_stop_in_subtrajectories:
+        #     data_cp['num']['action_low'] = [
+        #         data_cp['num']['action_low'][0] + [data['num']['action_low'][-1][0]]
+        #     ]
+        if add_stop_in_subtrajectories:
+            # pull the stop action from the end. the high_idx will stay unchanged, but we're not updating those
+            assert len(data['num']['action_low'][-1]) == 1
+            data_cp['num']['action_low'].append(data['num']['action_low'][-1])
+
+        data_cp['subgoal_idx'] = subgoal_index
+
+        return data_cp
+
     def __init__(self, args, data, model_class, test_mode, featurize=True):
-        self.data = data
+        self._data = data
         self.model_class = model_class
         self.args = args
         self.test_mode = test_mode
         self.featurize = featurize
 
     def __getitem__(self, idx):
-
         # Load task from dataset.
-        task = self.model_class.load_task_json(self.args, self.data[idx], None)[0]
+        task = AlfredDataset.load_task_json_unsplit(self.args, self._data[idx])
 
         # Create dict of features from dict.
         if self.featurize:
@@ -175,7 +357,7 @@ class AlfredDataset(Dataset):
         return (task, feat)
 
     def __len__(self):
-        return len(self.data)
+        return len(self._data)
 
     @staticmethod
     def collate_fn(batch):
@@ -215,21 +397,87 @@ class AlfredDataset(Dataset):
                 seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
                 feat[k] = pad_seq
-            elif k in {'instr_chunk_labels'}:
-                # from Chunker
-                seqs = [torch.tensor(vv, dtype=torch.long) for vv in v]
-                pad_seq = pad_sequence(pad_sequence(seqs, batch_first=True, padding_value=0))
-                seq_lengths = np.array(list(map(len, v)))
-                feat[k] = (pad_seq, seq_lengths)
-            elif k in {'lang_instr_len'}:
+            elif k in {'lang_goal_instr_len', 'lang_instr_len'}:
                 feat[k] = torch.tensor(v, dtype=torch.long)
+            elif k in {'lang_instr_subgoal_mask', 'lang_goal_instr_subgoal_mask'}:
+                seqs = [torch.tensor(vv, dtype=torch.bool) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=False)
+                feat[k] = pad_seq
             else:
                 # default: tensorize and pad sequence
                 seqs = [tensorize(vv, k) for vv in v]
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
                 feat[k] = pad_seq
 
+
+        ## due to the segment merging in merge_last_two_low_actions in preprocess.py, in some very rare
+        ## cases, ['action_low'] has more timesteps than frames. There is code various other places (e.g. Decoder.forward())
+        ## to handle this, but it still breaks if we get unlucky and an entire batch consists of these examples,
+        ## as it does with subtrajectories filtered to the SliceGoal subgoal
+        if 'action_low' in feat:
+            bsz, t = feat['action_low'].size()
+            bsz_, t_, *_ = feat['frames'].size()
+            assert bsz == bsz_
+            while t != t_:
+                feat['frames'] = torch.cat((
+                    feat['frames'], feat['frames'][:,-1].unsqueeze(1)
+                ),dim=1)
+                t_ = feat['frames'].size(1)
+
         return (batch, feat)
+
+class AlfredSubtrajectoryDataset(AlfredDataset):
+    def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None,
+                 add_stop_in_subtrajectories=True,
+                 filter_instructions=True):
+        """
+        :param args:
+        :param data:
+        :param model_class:
+        :param test_mode:
+        :param featurize:
+        :param subgoals:  if None, load all sub-trajectory types. otherwise, a set of sub-trajectories to filter to
+        """
+        super().__init__(args, data, model_class, test_mode, featurize=featurize)
+        self.subgoal_names = subgoal_names
+        self._task_and_indices = []
+        self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
+        self.filter_instructions = filter_instructions
+
+        if len(data) > 1000:
+            iter = tqdm.tqdm(data, ncols=80, desc='dataset: getting subgoals')
+        else:
+            iter = data
+
+        for datum in iter:
+            task = AlfredDataset.load_task_json_unsplit(self.args, datum)
+            subgoal_indices = AlfredDataset.extract_subgoal_indices(
+                task, subgoal_names=subgoal_names, keep_noop=False
+            )
+            for ix in subgoal_indices:
+                self._task_and_indices.append((task, ix))
+
+    def __getitem__(self, idx):
+        task, subgoal_index = self._task_and_indices[idx]
+        old_task = json.dumps(task)
+        task = AlfredDataset.filter_subgoal_index(
+            task,
+            subgoal_index,
+            add_stop_in_subtrajectories=self.add_stop_in_subtrajectories,
+            filter_instructions=self.filter_instructions
+        )
+        assert json.dumps(self._task_and_indices[idx][0]) == old_task
+
+        # Create dict of features from dict.
+        if self.featurize:
+            feat = self.model_class.featurize(task, self.args, self.test_mode)
+        else:
+            feat = None
+
+        return (task, feat)
+
+    def __len__(self):
+        return len(self._task_and_indices)
 
 class BaseModule(nn.Module):
     """inheritable by seq2seq and instruction chunker"""
@@ -242,100 +490,17 @@ class BaseModule(nn.Module):
         if not is_serialized:
             feat['num']['sub_instr_lengths'] = [len(desc) for desc in feat['num']['lang_instr']]
             feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
+            if 'lang_instr_subgoal_mask' in feat['num']:
+                # currently this is only added by the subtrajectory dataset
+                mask = [x for xs in feat['num']['lang_instr_subgoal_mask'] for x in xs]
+                feat['num']['lang_instr_subgoal_mask'] = mask
+                # check types
+                # took these out because the goal is prepended
+                # assert mask[0] == False or mask[0] == True
+                # feat['num']['lang_instr_subgoal_start'] = mask.index(True)
+                # feat['num']['lang_instr_subgoal_end'] = len(mask)-1 - mask[::-1].index(True)
         if not test_mode:
             feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-
-    @classmethod
-    def filter_subgoal(self, data, subgoal_name):
-        '''
-        Filter a loaded json to only include examples from a specific type of subgoal.
-        Returns a list of individual examples for subgoal type followed by the NoOp action.
-        '''
-        # First get idx of segments where specified subgoal takes place.
-        valid_idx = set()
-
-        for subgoal in data['plan']['high_pddl']:
-
-            curr_subgoal = subgoal['discrete_action']['action']
-
-            # Keep the subgoal we're looking for.
-            if curr_subgoal == subgoal_name:
-                valid_idx.add(subgoal['high_idx'])
-
-            # As well as the final NoOp operation, we will copy this to the end of every subgoal example.
-            elif curr_subgoal == 'NoOp':
-                noop_idx = subgoal['high_idx']
-
-        # No examples will be added from this file to dataset.
-        if len(valid_idx) == 0:
-            return []
-
-        # Use for counting dataset examples.
-        #self.subgoal_count += len(valid_idx) - 1
-        #self.trajectories_count += 1
-        #for subgoal in data['plan']['high_pddl']: self.subgoal_set.add(subgoal['discrete_action']['action'])
-        #return
-
-        # Create an example from each instance of the subgoal.
-        examples = []
-
-        for idx in valid_idx:
-
-            # Copy data to make individual example.
-            data_cp = deepcopy(data)
-
-            # Filter language instructions.
-            data_cp['num']['lang_instr'] = [data_cp['num']['lang_instr'][idx]]
-
-            # Filter low level actions.
-            data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == idx]
-
-            # Filter images.
-            data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == idx]
-
-            # Fix image idx.
-            low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
-
-            for img in data_cp['images']:
-                img['low_idx'] = low_idxs.index(img['low_idx'])
-
-            # Filter action-low.
-            for i in range(len(data_cp['num']['action_low'])):
-                data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
-
-            data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
-
-            # Extend low-level actions with stop action.
-            if not len(data_cp['num']['action_low']) == 1:
-                continue
-
-            assert(len(data_cp['num']['action_low']) == 1)
-
-            data_cp['num']['action_low'][0].append(data['num']['action_low'][-1][0])
-
-            examples.append(data_cp)
-
-        return examples
-
-
-    @classmethod
-    def load_task_json(cls, args, task, subgoal=None):
-        '''
-        load preprocessed json from disk
-        '''
-        json_path = os.path.join(args.data, task['task'], '%s' % args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
-        with open(json_path) as f:
-            data = json.load(f)
-
-        data['repeat_idx'] = task['repeat_idx']
-
-        if subgoal is not None:
-
-            # Will return list of subgoal datapoints.
-            return cls.filter_subgoal(data, subgoal)
-
-        # Otherwise return list with singleton item.
-        return [data]
 
     @classmethod
     def get_task_root(cls, ex, args):
@@ -386,6 +551,11 @@ class BaseModule(nn.Module):
         #self.subgoal_count = 0
         #self.trajectories_count = 0
         #self.subgoal_set = set()
+
+    def get_instance_key(self, instance):
+        # return a unique identifier for the instance in the dataset
+        # TODO: move this to AlfredDataset / AlfredSubtrajectoryDataset
+        return instance['task_id'], instance['repeat_idx'], instance['subgoal_idx']
 
     def forward(self, feat, max_decode=100):
         raise NotImplementedError()
@@ -471,15 +641,28 @@ class BaseModule(nn.Module):
         random_state.shuffle(train_subset)
         train_subset = train_subset[::20]
 
+        # this isn't implemented for instruction_chunker
+        if vars(args).get('train_on_subtrajectories', False) or vars(args).get('train_on_subtrajectories_full_instructions', False):
+            if args.subgoal:
+                subgoal_names = {args.subgoal}
+            else:
+                subgoal_names = None
+
+            full_instructions = vars(args).get('train_on_subtrajectories_full_instructions', False)
+            dataset_constructor = lambda tasks: AlfredSubtrajectoryDataset(
+                args, tasks, self.__class__, False, subgoal_names=subgoal_names,
+                filter_instructions = not full_instructions
+            )
+        else:
+            dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
 
         # Put dataset splits into wrapper class for parallelizing data-loading.
-        train = AlfredDataset(args, train, self.__class__, False)
-        valid_seen = AlfredDataset(args, valid_seen, self.__class__, False)
-        valid_unseen = AlfredDataset(args, valid_unseen, self.__class__, False)
+        train = dataset_constructor(train)
+        valid_seen = dataset_constructor(valid_seen)
+        valid_unseen = dataset_constructor(valid_unseen)
+        train_subset = dataset_constructor(train_subset)
 
-        train_subset = AlfredDataset(args, train_subset, self.__class__, False)
-
-        # this didn't seem to give a speedup
+        # setting this to True didn't seem to give a speedup
         pin_memory = False
 
         # DataLoaders
@@ -496,7 +679,7 @@ class BaseModule(nn.Module):
             json.dump(vars(args), f, indent=2)
 
         # optimizer
-        if args.lang_model == 'bert':
+        if vars(args).get('lang_model', '') == 'bert':
             self.emb_word.requires_grad = False
             self.lang_projection.requires_grad = False
 
@@ -535,6 +718,9 @@ class BaseModule(nn.Module):
 
                     out = self.forward(feat)
                     preds = self.extract_preds(out, batch, feat)
+                    if 'action_low_mask' in preds:
+                        # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
+                        del preds['action_low_mask']
                     p_train.update(preds)
                     loss = self.compute_loss(out, batch, feat)
                     for k, v in loss.items():
@@ -544,17 +730,17 @@ class BaseModule(nn.Module):
 
                     # optimizer backward pass, also optimize bert params if needed. 
                     optimizer.zero_grad()                    
-                    if args.lang_model == 'bert': 
+                    if vars(args).get('lang_model', '') == 'bert':
                         bert_optim.zero_grad()
                     
                     sum_loss = sum(loss.values())
                     sum_loss.backward()
 
                     optimizer.step()
-                    if args.lang_model == 'bert': 
+                    if vars(args).get('lang_model', '') == 'bert':
                         bert_optim.step()
                         bert_scheduler.step()
-    
+
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()
                     total_train_loss.append(float(sum_loss))
@@ -564,7 +750,7 @@ class BaseModule(nn.Module):
                     # print('Batch time in seconds: {}'.format(e_time - s_time))
 
             # Scheduler step for bert warmup if needed. 
-            if args.lang_model == 'bert':
+            if vars(args).get('lang_model', '') == 'bert':
                 pass#bert_scheduler.step()
 
             print('\ntrain subset metrics\n')
@@ -605,9 +791,10 @@ class BaseModule(nn.Module):
                 with open(fbest, 'wt') as f:
                     json.dump(stats, f, indent=2)
 
-                fpred = os.path.join(args.dout, 'valid_seen.debug.preds.json')
-                with open(fpred, 'wt') as f:
-                    json.dump(self.make_debug(p_valid_seen, valid_seen), f, indent=2)
+                if not args.no_make_debug:
+                    fpred = os.path.join(args.dout, 'valid_seen.epoch-{}.debug.preds.json'.format(epoch))
+                    with open(fpred, 'wt') as f:
+                        json.dump(self.make_debug(p_valid_seen, valid_seen), f, indent=2)
                 best_loss['valid_seen'] = total_valid_seen_loss
 
             # new best valid_unseen loss
@@ -625,9 +812,10 @@ class BaseModule(nn.Module):
                 with open(fbest, 'wt') as f:
                     json.dump(stats, f, indent=2)
 
-                fpred = os.path.join(args.dout, 'valid_unseen.debug.preds.json')
-                with open(fpred, 'wt') as f:
-                    json.dump(self.make_debug(p_valid_unseen, valid_unseen), f, indent=2)
+                if not args.no_make_debug:
+                    fpred = os.path.join(args.dout, 'valid_unseen.epoch-{}.debug.preds.json'.format(epoch))
+                    with open(fpred, 'wt') as f:
+                        json.dump(self.make_debug(p_valid_unseen, valid_unseen), f, indent=2)
 
                 best_loss['valid_unseen'] = total_valid_unseen_loss
 
@@ -645,15 +833,22 @@ class BaseModule(nn.Module):
             }, fsave)
 
             # debug action output json
-            fpred = os.path.join(args.dout, 'train.debug.preds.json')
-            with open(fpred, 'wt') as f:
-                json.dump(self.make_debug(p_train, train), f, indent=2)
+            if not args.no_make_debug:
+                fpred = os.path.join(args.dout, 'train_subset.epoch-{}.debug.preds.json'.format(epoch))
+                with open(fpred, 'wt') as f:
+                    json.dump(self.make_debug(p_train, train_subset), f, indent=2)
+
+            iters_by_split = {
+                'train': train_iter,
+                'valid_seen': valid_seen_iter,
+                'valid_unseen': valid_unseen_iter,
+            }
 
             # write stats
             for split in stats.keys():
                 if isinstance(stats[split], dict):
                     for k, v in stats[split].items():
-                        self.summary_writer.add_scalar(split + '/' + k, v, train_iter)
+                        self.summary_writer.add_scalar(split + '/' + k, v, iters_by_split[split])
             pprint.pprint(stats)
 
     def run_pred(self, dev_loader, args=None, name='dev', iter=0):
@@ -672,6 +867,9 @@ class BaseModule(nn.Module):
 
                 out = self.forward(feat)
                 preds = self.extract_preds(out, batch, feat)
+                if 'action_low_mask' in preds:
+                    # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
+                    del preds['action_low_mask']
                 p_dev.update(preds)
                 #pdb.set_trace()
                 loss = self.compute_loss(out, batch, feat)

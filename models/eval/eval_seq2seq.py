@@ -1,19 +1,22 @@
 import os
 import sys
+
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 
+import pprint
 import argparse
 import torch.multiprocessing as mp
 from eval_task import EvalTask
 from eval_subgoals import EvalSubgoals
-from eval_benchmark import EvalBenchmark
 from eval_hierarchical import EvalHierarchical
 
+from models.utils.helper_utils import print_git_info
 
 if __name__ == '__main__':
     # multiprocessing settings
+    print(' '.join(sys.argv))
     mp.set_start_method('spawn')
     manager = mp.Manager()
 
@@ -31,6 +34,10 @@ if __name__ == '__main__':
     parser.add_argument('--shuffle', dest='shuffle', action='store_true')
     parser.add_argument('--gpu', dest='gpu', action='store_true')
     parser.add_argument('--num_threads', type=int, default=1)
+    parser.add_argument('--indep-modules', help='uses independent submodules that keep their own hidden state', action='store_true')
+
+
+    parser.add_argument('--instance_limit', type=int)
 
     # eval params
     parser.add_argument('--max_steps', type=int, default=500, help='max steps before episode termination')
@@ -46,29 +53,39 @@ if __name__ == '__main__':
     parser.add_argument('--modular_subgoals', action='store_true', help='this model was trained with the --subgoal argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
     parser.add_argument('--oracle', action='store_true', help='Use oracle for high-level controller.')
 
+    # TODO: just read these from the model arguments, possibly setting --skip_model_unroll_with_expert
+    parser.add_argument('--trained_on_subtrajectories', action='store_true', help='this model was trained with the --train_on_subtrajectories argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+    parser.add_argument('--trained_on_subtrajectories_full_instructions', action='store_true', help='this model was trained with the --train_on_subtrajectories_full_instructions argument to train_seq2seq; should also likely run with --skip_model_unroll_with_expert')
+
+    parser.add_argument('--subgoals_length_constrained', action='store_true', help='force the model to decode for exactly the length of the true segment')
+
     # debug
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--fast_epoch', dest='fast_epoch', action='store_true')
 
-    parser.add_argument('--benchmark', action='store_true')
-    parser.add_argument('--benchmark_batch_size', type=int, default=1)
+    parser.add_argument('--print_git', action='store_true')
 
     # parse arguments
     args = parser.parse_args()
+    pprint.pprint(vars(args))
 
-    if args.benchmark:
-        eval = EvalBenchmark(args, manager)
+    if args.print_git:
+        print_git_info()
+
+    if args.trained_on_subtrajectories or args.trained_on_subtrajectories_full_instructions:
+        if args.eval_type != 'subgoals':
+            raise NotImplementedError("subtrajectory training and non-subgoal evaluation is not implemented")
+
+    # eval mode
+    if args.eval_type == 'subgoals':
+        eval = EvalSubgoals(args, manager)
+
+    elif args.eval_type == 'hierarchical':
+
+        eval = EvalHierarchical(args, manager)
+
     else:
-        # eval mode
-        if args.eval_type == 'subgoals':
-            eval = EvalSubgoals(args, manager)
-
-        elif args.eval_type == 'hierarchical': 
-
-            eval = EvalHierarchical(args, manager)
-
-        else:
-            eval = EvalTask(args, manager)
+        eval = EvalTask(args, manager)
 
     # start threads
     eval.spawn_threads()

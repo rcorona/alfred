@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 import pdb
 
+BIG_NEG = -1e9
+
 class SelfAttn(nn.Module):
     '''
     self-attention with learnable parameters
@@ -25,12 +27,18 @@ class DotAttn(nn.Module):
         super(DotAttn, self).__init__()
         self.raw_score = None
 
-    def forward(self, inp, h):
-        score = self.softmax(inp, h)
+    def forward(self, inp, h, mask=None):
+        # mask: bool tensor, with False for locations that should *not* be attended to
+        score = self.softmax(inp, h, mask)
         return score.expand_as(inp).mul(inp).sum(1), score
 
-    def softmax(self, inp, h):
+    def softmax(self, inp, h, mask):
         raw_score = inp.bmm(h.unsqueeze(2))
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+            assert mask.size() == raw_score.size(), (mask.size(), raw_score.size())
+            # ~ not implemented on bool tensors in 1.1
+            raw_score.masked_fill_(~(mask.byte()), BIG_NEG)
         self.raw_score = raw_score
         score = F.softmax(raw_score, dim=1)
         return score
@@ -130,7 +138,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -139,7 +147,9 @@ class ConvFrameMaskDecoder(nn.Module):
         lang_feat_t = enc # language is encoded once at the start
 
         # attend over language
-        weighted_lang_t, lang_attn_t = self.attn(self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1))
+        weighted_lang_t, lang_attn_t = self.attn(
+            self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1), mask=encoder_mask,
+        )
 
         # concat visual feats, weight lang, and previous action embedding
         inp_t = torch.cat([vis_feat_t, weighted_lang_t, e_t], dim=1)
@@ -158,7 +168,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -169,10 +179,14 @@ class ConvFrameMaskDecoder(nn.Module):
         attn_scores = []
         for t in range(max_t):
             try: 
-                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+                action_t, mask_t, state_t, attn_score_t = self.step(
+                    enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+                )
             except: 
                 #pdb.set_trace()
-                action_t, mask_t, state_t, attn_score_t = self.step(enc, frames[:, -1], e_t, state_t)
+                action_t, mask_t, state_t, attn_score_t = self.step(
+                    enc, frames[:, -1], e_t, state_t, encoder_mask=encoder_mask
+                )
 
             masks.append(mask_t)
             actions.append(action_t)
@@ -211,7 +225,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
         self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
         self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
-
+#         if self.use_fc_nodes:
+#             self.fc_nodes = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
         # High level controller. 
         self.controller = nn.LSTMCell(dhid+dhid+dframe+demb, dhid)
         self.controller_attn = DotAttn()
@@ -265,16 +280,18 @@ class ConvFrameMaskDecoderModular(nn.Module):
             # update hidden state
             state_t = self.cell[i](inp_ti, (h_tm1, state_tm1[1]))
             state_t = [self.hstate_dropout(x) for x in state_t]
+            # batch x dhid
             h_t.append(state_t[0])
             c_t.append(state_t[1])
 
         # Attend over each modules output.
-        h_t_in = self.attn_dropout(torch.cat([h.unsqueeze(1) for h in h_t], dim=1))
+        h_t_in = self.attn_dropout(torch.cat([h.unsqueeze(1) for h in h_t], dim=1)) # batch x n_modules x dhid
         c_t = torch.cat([c.unsqueeze(1) for c in c_t], dim=1)
         inp_t = torch.cat(inp_t, dim=1)
         lang_attn_t = torch.cat(lang_attn_t, dim=-1)
 
         # Add stop embedding. 
+
         h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
 
         # Attend over submodules hidden states. 
@@ -390,7 +407,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -399,7 +416,9 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         lang_feat_t = enc # language is encoded once at the start
 
         # attend over language
-        weighted_lang_t, lang_attn_t = self.attn(self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1))
+        weighted_lang_t, lang_attn_t = self.attn(
+            self.attn_dropout(lang_feat_t), self.h_tm1_fc(h_tm1), mask=encoder_mask
+        )
 
         # concat visual feats, weight lang, and previous action embedding
         inp_t = torch.cat([vis_feat_t, weighted_lang_t, e_t], dim=1)
@@ -422,7 +441,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t, subgoal_t, progress_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -434,7 +453,9 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         subgoals = []
         progresses = []
         for t in range(max_t):
-            action_t, mask_t, state_t, attn_score_t, subgoal_t, progress_t = self.step(enc, frames[:, t], e_t, state_t)
+            action_t, mask_t, state_t, attn_score_t, subgoal_t, progress_t = self.step(
+                enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+            )
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)
@@ -537,6 +558,193 @@ class ConvFrameDecoder(nn.Module):
             'out_action_high': torch.stack(actions, dim=1),
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'state_t': state_t
+        }
+
+        return results
+
+    
+class SubtaskModule(nn.Module):
+    def __init__(self,dhid, din, index, use_fc_nodes=False):
+        super().__init__()
+        self.cell = nn.LSTMCell(din, dhid)
+        #self.fc_in = nn.Linear(dout, dh)
+        self.index = index
+        
+    def forward(self, x, controller_mask):
+        hx, cx  = self.cell(x, (self.hx, self.cx))
+        
+        # Only update state if selected
+        self.cx = cx*controller_mask[:, self.index].unsqueeze(1) + self.cx*(1-controller_mask[:, self.index].unsqueeze(1))
+        self.hx = hx*controller_mask[:, self.index].unsqueeze(1) + self.hx*(1-controller_mask[:, self.index].unsqueeze(1))
+
+        return self.hx, self.cx
+    
+    def reset(self, state_0):
+        self.hx = state_0[0]
+        self.cx = state_0[1]
+    
+class ConvFrameMaskDecoderModularIndependent(nn.Module):
+    '''
+    action decoder
+    '''
+
+    def __init__(self, emb, dframe, dhid, pframe=300,
+                 attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
+                 teacher_forcing=False, n_modules=8, use_fc_nodes=False):
+        super().__init__()
+        demb = emb.weight.size(1)
+
+        self.n_modules = n_modules
+
+        self.emb = emb
+        self.pframe = pframe
+        self.dhid = dhid
+        self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
+        self.cell = nn.ModuleList([SubtaskModule(din=dhid+dframe+demb, dhid=dhid, index=i, use_fc_nodes=use_fc_nodes) for i in range(n_modules)])
+        self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
+        # High level controller. 
+        self.controller = nn.LSTMCell(dhid+dhid+dframe+demb, dhid)
+        self.controller_attn = DotAttn()
+        self.controller_h_tm1_fc = nn.Linear(dhid, dhid)
+
+        # STOP module for high level controller. 
+        self.stop_embedding = torch.nn.init.uniform_(nn.Parameter(torch.zeros((self.dhid,))))
+
+        # Attention over modules. 
+        self.module_attn = DotAttn()
+
+        self.input_dropout = nn.Dropout(input_dropout)
+        self.attn_dropout = nn.Dropout(attn_dropout)
+        self.hstate_dropout = nn.Dropout(hstate_dropout)
+        self.actor_dropout = nn.Dropout(actor_dropout)
+        self.go = nn.Parameter(torch.Tensor(demb))
+        self.actor = nn.Linear(dhid+dhid+dframe+demb, demb)
+        self.mask_dec = MaskDecoder(dhid=dhid+dhid+dframe+demb, pframe=self.pframe)
+        self.teacher_forcing = teacher_forcing
+        self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
+
+        nn.init.uniform_(self.go, -0.1, 0.1)
+
+    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask):
+        # previous decoder hidden state for modules. 
+        h_tm1 = state_tm1[0]
+        module_ids = controller_mask.max(1)[1].squeeze()
+        batch_sz = frame.size(0)
+
+        # encode vision and lang feat
+        vis_feat_t = self.vis_encoder(frame)
+        lang_feat_t = enc # language is encoded once at the start
+
+        lang_attn_t = []
+        h_t = []
+        c_t = []
+        inp_t = []
+
+        # Iterate over each module. 
+        for i in range  (self.n_modules): 
+
+            # attend over language
+            weighted_lang_ti, lang_attn_ti = self.attn[i](self.attn_dropout(lang_feat_t), self.h_tm1_fc[i](h_tm1))
+            lang_attn_t.append(lang_attn_ti)
+
+            # concat visual feats, weight lang, and previous action embedding
+            inp_ti = torch.cat([vis_feat_t, weighted_lang_ti, e_t], dim=1)
+            inp_ti = self.input_dropout(inp_ti)
+            inp_t.append(inp_ti.unsqueeze(1))
+
+            # update hidden state
+            state_t = self.cell[i](inp_ti, controller_mask)
+            state_t = [self.hstate_dropout(x) for x in state_t]
+            h_t.append(state_t[0])
+            c_t.append(state_t[1])
+
+        # Attend over each modules output.
+        h_t_in = self.attn_dropout(torch.cat([h.unsqueeze(1) for h in h_t], dim=1))
+        c_t = torch.cat([c.unsqueeze(1) for c in c_t], dim=1)
+        inp_t = torch.cat(inp_t, dim=1)
+        lang_attn_t = torch.cat(lang_attn_t, dim=-1)
+
+        # Add stop embedding. 
+        h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
+
+        # Attend over submodules hidden states. 
+        # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism. 
+        _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
+        module_attn_logits = self.controller_attn.raw_score
+
+        # If no supervised/forced attention is provided, then used inferred values.  
+        if controller_mask is None: 
+            module_attn = module_scores
+
+            # Only pay attention to a single module. 
+            max_subgoal = module_attn.max(1)[1].squeeze()
+            
+            module_attn = torch.zeros_like(module_attn)
+            module_attn[:,max_subgoal,:] = 1.0
+
+        # Otherwise use ground truth attention. 
+        else:
+            module_attn = controller_mask.unsqueeze(-1).float()
+
+        h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
+        c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
+        inp_t = module_attn[:,:-1,:].expand_as(inp_t).mul(inp_t).sum(1)
+        lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+
+        # decode action and mask
+        cont_t = torch.cat([h_t_in, inp_t], dim=1) # TODO Add controller_lang_emb
+        action_emb_t = self.actor(self.actor_dropout(cont_t))
+        action_t = action_emb_t.mm(self.emb.weight.t())
+        mask_t = self.mask_dec(cont_t)
+
+        # update controller hidden state
+        controller_state_t = self.controller(cont_t, controller_state_tm1)
+        controller_state_t = [self.hstate_dropout(x) for x in controller_state_t]
+
+        # Package weighted state for output. 
+        state_t = (h_t_in, c_t)
+
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9), module_attn
+
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
+        max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
+        batch = enc.size(0)
+        e_t = self.go.repeat(batch, 1)
+        state_t = state_0
+        for n in range(self.n_modules):
+            self.cell[n].reset(state_0)
+        controller_state_t = controller_state_0
+
+        actions = []
+        masks = []
+        attn_scores = []
+        module_attn_scores = []
+        for t in range(max_t):
+
+            # Mask input for high level controller. 
+            if controller_mask is None: 
+                controller_mask_in = None
+            else: 
+                controller_mask_in = controller_mask[:,t]
+
+            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
+            masks.append(mask_t)
+            actions.append(action_t)
+            attn_scores.append(attn_score_t)
+            module_attn_scores.append(module_attn_score_t)
+            if self.teacher_forcing and self.training:
+                w_t = gold[:, t]
+            else:
+                w_t = action_t.max(1)[1]
+            e_t = self.emb(w_t)
+
+        results = {
+            'out_action_low': torch.stack(actions, dim=1),
+            'out_action_low_mask': torch.stack(masks, dim=1),
+            'out_attn_scores': torch.stack(attn_scores, dim=1),
+            'out_module_attn_scores': torch.cat(module_attn_scores, dim=1),
+            'state_t': state_t, 
+            'controller_state': controller_state_t
         }
 
         return results

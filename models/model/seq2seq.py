@@ -13,69 +13,6 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from models.model.base import BaseModule, embed_packed_sequence
 from transformers import BertModel, BertTokenizer
 
-class AlfredDataset(Dataset): 
-
-    def __init__(self, args, data, model_class, test_mode): 
-        self.data = data
-        self.model_class = model_class
-        self.args = args
-        self.test_mode = test_mode
-
-    def __getitem__(self, idx): 
-
-        # Load task from dataset. 
-        task = self.model_class.load_task_json(self.args, self.data[idx], None)[0] 
-
-        # Create dict of features from dict. 
-        feat = self.model_class.featurize(task, self.args, self.test_mode)
-
-        return (task, feat)
-
-    def __len__(self): 
-        return len(self.data)
-
-    def collate_fn(batch): 
-      
-        tasks = [e[0] for e in batch]
-        feats = [e[1] for e in batch]
-        batch = tasks # Stick to naming convention. 
-
-        pad = 0
-
-        # Will hold vectorized features. 
-        feat = {}
-
-        # Make batch out feature dicts.
-        for k in feats[0].keys(): 
-            feat[k] = [element[k] for element in feats]
-
-        # tensorization and padding
-        for k, v in feat.items():
-            if k in {'lang_goal_instr'}:
-                # language embedding and padding
-                seqs = [torch.tensor(vv) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                seq_lengths = torch.from_numpy(np.array(list(map(len, v)))).long()
-                feat[k] = (pad_seq, seq_lengths)
-                #embed_seq = self.emb_word(pad_seq)
-                #packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
-                #feat[k] = packed_input
-            elif k in {'action_low_mask'}:
-                # mask padding
-                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
-                feat[k] = seqs
-            elif k in {'subgoal_progress', 'subgoals_completed'}:
-                # auxillary padding
-                seqs = [torch.tensor(vv, dtype=torch.float) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                feat[k] = pad_seq
-            
-            else:
-                # default: tensorize and pad sequence
-                seqs = [torch.tensor(vv, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
-                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=pad)
-                feat[k] = pad_seq
-
 class Module(BaseModule):
 
     # static sentinel tokens
@@ -95,11 +32,14 @@ class Module(BaseModule):
 
         self.vocab = vocab
 
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(args).get("lang_model", "default")
+
         # Word embeddings. 
-        if args.lang_model == 'default': 
+        if lang_model == 'default':
             self.emb_word = nn.Embedding(len(vocab['word']), args.demb)
         
-        elif args.lang_model == 'bert': 
+        elif lang_model == 'bert':
             
             # Load BERT tokenizer and model. 
             self.__class__.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -117,17 +57,22 @@ class Module(BaseModule):
         raise NotImplementedError()
 
     @classmethod
-    def post_process_lang(cls, ex, args): 
-        
-        # Default partitioning. 
-        if args.lang_model == 'default':
+    def post_process_lang(cls, ex, args):
+
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(args).get("lang_model", "default")
+
+        # Default partitioning.
+        if lang_model == 'default':
             goal, instr = ex['num']['lang_goal'], ex['num']['lang_instr']
 
-        elif args.lang_model == 'bert': 
+        elif lang_model == 'bert':
 
             # Get strings for goal and low-level instruction. 
             goal = ''.join(['[SEP]'] + ex['ann']['goal'][:-1] + ['[SEP]'])
             instr = ''.join(['[CLS]'] + [word for desc in ex['ann']['instr'] for word in desc])
+
+            # TODO: tokenizer.encode already appends [CLS] and [SEP]
 
             # Run them through tokenizer and concatenate. 
             goal = cls.tokenizer.encode(goal)
@@ -138,21 +83,26 @@ class Module(BaseModule):
     def encode_lang_base(self, feat): 
 
         lang_goal_instr = feat['lang_goal_instr'].long()
-        seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
+        # the line below doesn't account for padding
+        # seq_lengths = torch.from_numpy(np.array(list(map(len, lang_goal_instr)))).long()
+        seq_lengths = feat['lang_goal_instr_len']
+
+        # for backward compatibility when evaluating models trained before the BERT code was implemented
+        lang_model = vars(self.args).get("lang_model", "default")
 
         # Place on GPU if needed. 
         if self.args.gpu: 
             lang_goal_instr = lang_goal_instr.cuda()
             seq_lengths = seq_lengths.cuda()
 
-        if self.args.lang_model == 'default': 
+        if lang_model == 'default':
             embed_seq = self.emb_word(lang_goal_instr)
             emb_lang_goal_instr = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
             self.lang_dropout(emb_lang_goal_instr.data)
             enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
             enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
 
-        elif self.args.lang_model == 'bert': 
+        elif lang_model == 'bert':
             
             # Attention mask to ignore padding tokens. 
             attention_mask = lang_goal_instr != 0
@@ -196,17 +146,41 @@ class Module(BaseModule):
         # goal and instr language. 
         lang_goal, lang_instr = cls.post_process_lang(ex, args)
 
+        goal, instr = ex['num']['lang_goal'], ex['num']['lang_instr']
         # zero inputs if specified
         lang_goal = cls.zero_input(lang_goal) if args.zero_goal else lang_goal
         lang_instr = cls.zero_input(lang_instr) if args.zero_instr else lang_instr
 
+        lang_model = vars(args).get("lang_model", "default")
+
+        get_mask = 'lang_instr_subgoal_mask' in ex['num']
+
+        # TODO: implement mask expansion for BERT
+        if get_mask:
+            if lang_model == 'bert':
+                raise NotImplementedError("TODO: add mask expansion to BERT")
+            assert len(lang_goal) == len(ex['num']['lang_goal']) and len(lang_instr) == len(ex['num']['lang_instr'])
+
+            # TODO: consider changing this to True?
+            lang_goal_mask = [False] * len(lang_goal)
+            lang_instr_mask = ex['num']['lang_instr_subgoal_mask']
+            assert len(lang_instr_mask) == len(lang_instr)
+
         # append goal + instr
-        if args.lang_model == 'default': 
+        if lang_model == 'default':
             lang_goal_instr = lang_goal + lang_instr
-        elif args.lang_model == 'bert': 
+            if get_mask:
+                lang_goal_instr_mask = lang_goal_mask + lang_instr_mask
+        elif lang_model == 'bert':
             lang_goal_instr = lang_instr + lang_goal
+            if get_mask:
+                lang_goal_instr_mask = lang_instr_mask + lang_goal_mask
 
         feat['lang_goal_instr'] = lang_goal_instr
+        feat['lang_goal_instr_len'] = len(lang_goal_instr)
+        if get_mask:
+            feat['lang_instr_subgoal_mask'] = lang_instr_mask
+            feat['lang_goal_instr_subgoal_mask'] = lang_goal_instr_mask
 
         # load Resnet features from disk
         if load_frames and not test_mode:
@@ -217,6 +191,7 @@ class Module(BaseModule):
                 # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
                 if keep[d['low_idx']] is None:
                     keep[d['low_idx']] = im[i]
+            assert all(x is not None for x in keep)
             keep.append(keep[-1])  # stop frame
             feat['frames'] = torch.stack(keep, dim=0)
 
@@ -227,6 +202,14 @@ class Module(BaseModule):
         if not test_mode:
             # low-level action
             feat['action_low'] = [a['action'] for a in ex['num']['action_low']]
+
+            ## this warning prints for < 10 examples (out of 20K) in the training set,
+            ## and it's due to the segment merging in merge_last_two_low_actions in preprocess.py
+            # if len(feat['action_low']) != feat['frames'].size(0):
+            #     key = ex['task_id'], ex['repeat_idx'], ex['subgoal_idx']
+            #     print("warning: number of actions {} does not match number of frames {} in instance {}".format(
+            #         len(feat['action_low']), feat['frames'].size(0), key
+            #     ))
 
             # low-level valid interact
             feat['action_low_valid_interact'] = np.array([a['valid_interact'] for a in ex['num']['action_low']])
@@ -240,15 +223,15 @@ class Module(BaseModule):
         debug = {}
         for ex, feat in tqdm.tqdm(data, ncols=80, desc='make_debug'):
             # if 'repeat_idx' in ex: ex = self.load_task_json(ex, None)[0]
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             this_debug = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
-                'p_action_low': preds[key]['action_low']
+                'p_action_low': preds[key]['action_low_names']
             }
             if 'controller_attn' in preds[key]:
                 this_debug['p_action_high'] = preds[key]['controller_attn']
-            debug['{}--{}'.format(*key)] = this_debug
+            debug['--'.join(map(str, key))] = this_debug
         return debug
 
     @classmethod
