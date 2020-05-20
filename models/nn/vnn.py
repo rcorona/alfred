@@ -213,9 +213,10 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
-                 teacher_forcing=False, n_modules=8):
+                 teacher_forcing=False, n_modules=8, controller_type='attention'):
         super().__init__()
         demb = emb.weight.size(1)
+        self.controller_type = controller_type
 
         self.n_modules = n_modules
 
@@ -227,16 +228,23 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
 #         if self.use_fc_nodes:
 #             self.fc_nodes = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
-        # High level controller. 
-        self.controller = nn.LSTMCell(dhid+dhid+dframe+demb, dhid)
-        self.controller_attn = DotAttn()
-        self.controller_h_tm1_fc = nn.Linear(dhid, dhid)
+        # High level controller.
+        if self.controller_type == 'attention':
+            self.controller = nn.LSTMCell(dhid+dhid+dframe+demb, dhid)
+            self.controller_attn = DotAttn()
+            self.controller_h_tm1_fc = nn.Linear(dhid, dhid)
 
-        # STOP module for high level controller. 
+            # Attention over modules. 
+            self.module_attn = DotAttn()
+        else:
+            self.controller = None
+            self.controller_attn = None
+            self.controller_h_tm1_fc = None
+            self.stop_embedding = None
+            self.module_attn = None
+
+        # STOP module for high level controller.
         self.stop_embedding = torch.nn.init.uniform_(nn.Parameter(torch.zeros((self.dhid,))))
-
-        # Attention over modules. 
-        self.module_attn = DotAttn()
 
         self.input_dropout = nn.Dropout(input_dropout)
         self.attn_dropout = nn.Dropout(attn_dropout)
@@ -295,23 +303,27 @@ class ConvFrameMaskDecoderModular(nn.Module):
         h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
 
         # Attend over submodules hidden states. 
-        # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism. 
-        _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
-        module_attn_logits = self.controller_attn.raw_score
+        # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism.
+        if self.controller_type == 'attention':
+            _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
+            module_attn_logits = self.controller_attn.raw_score
+        else:
+            assert controller_mask is not None, "when not using an attention-based controller, must pass controller_mask to step()"
 
-        # If no supervised/forced attention is provided, then used inferred values.  
-        if controller_mask is None: 
+        # If no supervised/forced attention is provided, then used inferred values.
+        if controller_mask is None:
             module_attn = module_scores
 
-            # Only pay attention to a single module. 
+            # Only pay attention to a single module.
             max_subgoal = module_attn.max(1)[1].squeeze()
-            
+
             module_attn = torch.zeros_like(module_attn)
             module_attn[:,max_subgoal,:] = 1.0
 
-        # Otherwise use ground truth attention. 
+        # Otherwise use ground truth attention.
         else:
             module_attn = controller_mask.unsqueeze(-1).float()
+
 
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
         c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
@@ -325,13 +337,18 @@ class ConvFrameMaskDecoderModular(nn.Module):
         mask_t = self.mask_dec(cont_t)
 
         # update controller hidden state
-        controller_state_t = self.controller(cont_t, controller_state_tm1)
-        controller_state_t = [self.hstate_dropout(x) for x in controller_state_t]
+        if self.controller_type == 'attention':
+            controller_state_t = self.controller(cont_t, controller_state_tm1)
+            controller_state_t = [self.hstate_dropout(x) for x in controller_state_t]
+            module_attn_logits_ret = module_attn_logits.view(batch_sz,1,9)
+        else:
+            controller_state_t = None
+            module_attn_logits_ret = None
 
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9), module_attn
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
@@ -343,7 +360,11 @@ class ConvFrameMaskDecoderModular(nn.Module):
         actions = []
         masks = []
         attn_scores = []
-        module_attn_scores = []
+        if self.controller_type == 'attention':
+            module_attn_scores = []
+        else:
+            assert controller_mask is not None, "when not using an attention-based controller, must pass controller_mask to step()"
+
         for t in range(max_t):
 
             # Mask input for high level controller. 
@@ -356,7 +377,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)
-            module_attn_scores.append(module_attn_score_t)
+            if self.controller_type == 'attention':
+                module_attn_scores.append(module_attn_score_t)
             if self.teacher_forcing and self.training:
                 w_t = gold[:, t]
             else:
@@ -367,10 +389,11 @@ class ConvFrameMaskDecoderModular(nn.Module):
             'out_action_low': torch.stack(actions, dim=1),
             'out_action_low_mask': torch.stack(masks, dim=1),
             'out_attn_scores': torch.stack(attn_scores, dim=1),
-            'out_module_attn_scores': torch.cat(module_attn_scores, dim=1),
-            'state_t': state_t, 
+            'state_t': state_t,
             'controller_state': controller_state_t
         }
+        if self.controller_type == 'attention':
+            results['out_module_attn_scores'] = torch.cat(module_attn_scores, dim=1)
 
         return results
 

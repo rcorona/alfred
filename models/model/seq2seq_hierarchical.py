@@ -46,6 +46,9 @@ class Module(Base):
 
         self.args = args
 
+        self.controller_type = vars(args).get('hierarchical_controller', 'attention')
+        assert self.controller_type in {'attention', 'chunker'}, "invalid --hierarchical_controller {}".format(self.controller_type)
+
         # TODO remove hardcoding and base on list of module names or something. 
         # n_modules = 8
 
@@ -55,7 +58,10 @@ class Module(Base):
 
         # encoder and self-attention for starting state modules and high-level controller.
         self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
-        self.enc_att = nn.ModuleList([vnn.SelfAttn(args.dhid*2) for i in range(2)]) # One for submodules and one for controller. 
+        if self.controller_type == 'attention':
+            self.enc_att = nn.ModuleList([vnn.SelfAttn(args.dhid*2) for i in range(2)]) # One for submodules and one for controller.
+        else:
+            self.enc_att = nn.ModuleList([vnn.SelfAttn(args.dhid*2)]) # just for submodules
 
         # subgoal monitoring
         self.subgoal_monitoring = (self.args.pm_aux_loss_wt > 0 or self.args.subgoal_aux_loss_wt > 0)
@@ -74,7 +80,8 @@ class Module(Base):
                            hstate_dropout=args.hstate_dropout,
                            actor_dropout=args.actor_dropout,
                            input_dropout=args.input_dropout,
-                           teacher_forcing=args.dec_teacher_forcing)
+                           teacher_forcing=args.dec_teacher_forcing,
+                           controller_type=self.controller_type) # TODO(dfried): implement controller type for ConvFrameMaskDecoderProgressMonitor
 
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)
@@ -277,7 +284,10 @@ class Module(Base):
 
         # Each module will have its own cell, but all will share a hidden state. TODO should we only have one cell state too? 
         state_0 = cont_lang[0], torch.zeros_like(cont_lang[0])
-        controller_state_0 = cont_lang[1], torch.zeros_like(cont_lang[1])
+        if self.controller_type == 'attention':
+            controller_state_0 = cont_lang[1], torch.zeros_like(cont_lang[1])
+        else:
+            controller_state_0 = None
         frames = self.vis_dropout(feat['frames'])
         
         # Get ground truth attention if provided. 
@@ -286,7 +296,10 @@ class Module(Base):
         else: 
             controller_mask = None
 
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, controller_state_0=controller_state_0, controller_mask=controller_mask)
+        res = self.dec(
+            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0,
+            controller_state_0=controller_state_0, controller_mask=controller_mask
+        )
         feat.update(res)
         return feat
 
@@ -326,7 +339,10 @@ class Module(Base):
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
             self.r_state['state_t'] = self.r_state['cont_lang'][0], torch.zeros_like(self.r_state['cont_lang'][0])
-            self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
+            if self.controller_type == 'attention':
+                self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
+            else:
+                self.r_state['controller_state_t'] = None
 
         if self.r_state['subgoal_counter'] == 0:
 
@@ -364,6 +380,7 @@ class Module(Base):
 
             else:
                 # Only pay attention to a single module.
+                # TODO(dfried): fix this later with the instruction chunker
                 max_subgoal = controller_attn_logits.max(2)[1].squeeze()
                 
             module_attn = torch.zeros_like(out_controller_attn).view(1,-1)
@@ -393,8 +410,9 @@ class Module(Base):
         if not allow_stop:
             raise NotImplementedError("allow_stop=False")
 
-        for ex, alow, alow_mask, controller_attn in zip(batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask'],
-                feat['out_module_attn_scores'].max(2)[1].tolist()):
+        for ix, (ex, alow, alow_mask) in enumerate(zip(
+            batch, feat['out_action_low'].max(2)[1].tolist(), feat['out_action_low_mask'],
+        )):
             """
             # remove padding tokens
             if self.pad in alow:
@@ -402,23 +420,27 @@ class Module(Base):
                 alow = alow[:pad_start_idx]
                 alow_mask = alow_mask[:pad_start_idx]
             """
+            if self.controller_type == 'attention':
+                controller_attn = feat['out_module_attn_scores'].max(2)[1][ix]
+                if clean_special_tokens:
 
-            if clean_special_tokens:
+                    # Stop each trajectory after high-level controller stops.
+                    if self.noop_index in controller_attn:
+                        stop_start_idx = controller_attn.index(self.noop_index)
+                        alow = alow[:stop_start_idx]
+                        controller_attn = controller_attn[:stop_start_idx+1]
+                        alow_mask = alow_mask[:stop_start_idx+1]
 
-                # Stop each trajectory after high-level controller stops.
-                if self.noop_index in controller_attn:
-                    stop_start_idx = controller_attn.index(self.noop_index)
-                    alow = alow[:stop_start_idx]
-                    controller_attn = controller_attn[:stop_start_idx+1]
-                    alow_mask = alow_mask[:stop_start_idx+1]
-
-                """
-                # remove <<stop>> tokens
-                if self.stop_token in alow:
-                    stop_start_idx = alow.index(self.stop_token)
-                    alow = alow[:stop_start_idx]
-                    alow_mask = alow_mask[:stop_start_idx]
-                """
+                    """
+                    # remove <<stop>> tokens
+                    if self.stop_token in alow:
+                        stop_start_idx = alow.index(self.stop_token)
+                        alow = alow[:stop_start_idx]
+                        alow_mask = alow_mask[:stop_start_idx]
+                    """
+            else:
+                pass
+                # TODO(dfried): truncate alow after seeing n stops, where n is the number of subgoals
 
             # index to API actions
             #words = self.vocab['action_low'].index2word(alow)
@@ -435,8 +457,9 @@ class Module(Base):
             pred[key] = {
                 'action_low_names': words,
                 'action_low_idxs': alow,
-                'controller_attn': controller_attn, # I think this has one element for each timestep, plus NoOp (stop)
             }
+            if self.controller_type == 'attention':
+                pred[key]['controller_attn'] = controller_attn # I think this has one element for each timestep, plus NoOp (stop)
             if return_masks:
                 pred[key]['action_low_mask'] = p_mask
 
@@ -472,13 +495,14 @@ class Module(Base):
         alow_loss = alow_loss.mean()
         losses['action_low'] = alow_loss * self.args.action_loss_wt
 
-        # Controller submodule attention loss.
-        #attn_loss = F.mse_loss(feat['out_module_attn_scores'].float(), feat['controller_attn_mask'].float(), reduction='none').sum(-1).view(-1)
-        attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,9), feat['module_idxs'].view(-1).long(), reduction='none')
+        if self.controller_type == 'attention':
+            # Controller submodule attention loss.
+            #attn_loss = F.mse_loss(feat['out_module_attn_scores'].float(), feat['controller_attn_mask'].float(), reduction='none').sum(-1).view(-1)
+            attn_loss = F.cross_entropy(feat['out_module_attn_scores'].float().view(-1,9), feat['module_idxs'].view(-1).long(), reduction='none')
 
-        # Mask attention loss both based on each sequences length as well as subgoal transition points in each trajectory. 
-        attn_loss = (attn_loss * feat['transition_mask'].view(-1,).float()).mean()
-        losses['controller_attn'] = attn_loss
+            # Mask attention loss both based on each sequences length as well as subgoal transition points in each trajectory.
+            attn_loss = (attn_loss * feat['transition_mask'].view(-1,).float()).mean()
+            losses['controller_attn'] = attn_loss
 
         # mask loss
         valid_idxs = valid.view(-1).nonzero().view(-1)
@@ -570,14 +594,15 @@ class Module(Base):
             high_idxs = np.append([0], stop_idxs + 1).astype(np.int32)
 
             # Get predicted submodule transitions
-            pred_high_idx = np.array(preds[key]['controller_attn'])[high_idxs]
-            label_high_idx = feat['module_idxs'][np.nonzero(feat['transition_mask'])]
+            if self.controller_type == 'attention':
+                pred_high_idx = np.array(preds[key]['controller_attn'])[high_idxs]
+                label_high_idx = feat['module_idxs'][np.nonzero(feat['transition_mask'])]
 
-            m['action_high_f1'].append(compute_f1(label_high_idx, pred_high_idx))
-            m['action_high_em'].append(compute_exact(label_high_idx, pred_high_idx))
+                m['action_high_f1'].append(compute_f1(label_high_idx, pred_high_idx))
+                m['action_high_em'].append(compute_exact(label_high_idx, pred_high_idx))
 
-            m['action_high_gold_length'].append(len(label_high_idx))
-            m['action_high_pred_length'].append(len(pred_high_idx))
-            m['action_high_edit_distance'].append(compute_edit_distance(label_high_idx, pred_high_idx))
+                m['action_high_gold_length'].append(len(label_high_idx))
+                m['action_high_pred_length'].append(len(pred_high_idx))
+                m['action_high_edit_distance'].append(compute_edit_distance(label_high_idx, pred_high_idx))
 
         return {k: sum(v)/len(v) for k, v in m.items()}

@@ -88,6 +88,7 @@ class EvalHierarchical(Eval):
             m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
             m_pred = list(m_pred.values())[0]
 
+            # TODO(dfried): use the instruction_chunker
             # check if <<stop>> was predicted for both low-level and high-level controller.
             if m_pred['controller_attn'][0] == 8: 
                 print("\tpredicted STOP")
