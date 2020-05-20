@@ -81,7 +81,7 @@ class Module(Base):
                            actor_dropout=args.actor_dropout,
                            input_dropout=args.input_dropout,
                            teacher_forcing=args.dec_teacher_forcing,
-                           controller_type=self.controller_type) # TODO(dfried): implement controller type for ConvFrameMaskDecoderProgressMonitor
+                           controller_type=self.controller_type) # TODO(dfried): add controller type for ConvFrameMaskDecoderProgressMonitor
 
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)
