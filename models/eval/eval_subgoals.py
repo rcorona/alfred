@@ -194,7 +194,7 @@ class EvalSubgoals(Eval):
                     must_stop = False
                 # forward model
                 if is_hierarchical:
-                    m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                    m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
                 else:
                     m_out = model.step(feat, prev_action=prev_action)
                 # traj_data is only used to get the keys returned in m_pred
@@ -222,8 +222,7 @@ class EvalSubgoals(Eval):
                 if is_hierarchical:
                     is_terminal = False
                     # check if <<stop>> was predicted for both low-level and high-level controller.
-                    # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
-                    if m_pred['controller_attn'][0] == 8:
+                    if m_pred['modules_used'][0] == 8:
                         is_terminal = True
 
                     # If we are switching submodules, then skip this step.
