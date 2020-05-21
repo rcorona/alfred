@@ -114,7 +114,9 @@ class EvalTask(Eval):
 
             if is_hierarchical:
                 # check if <<stop>> was predicted for both low-level and high-level controller.
-                high_level_stop = m_pred['modules_used'][0] == 8
+                # high_level_stop = m_pred['modules_used'][0] == 8
+                assert model.r_state['subgoal'].size() == (1,9)
+                high_level_stop = model.r_state['subgoal'][0,8] == 1
                 if high_level_stop:
                     print("\tpredicted (or fed) NoOp")
                     break

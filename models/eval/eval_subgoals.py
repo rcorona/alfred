@@ -225,8 +225,11 @@ class EvalSubgoals(Eval):
                 if is_hierarchical:
                     is_terminal = False
                     # check if <<stop>> was predicted for both low-level and high-level controller.
-                    if m_pred['modules_used'][0] == 8:
+                    assert model.r_state['subgoal'].size() == (1,9)
+                    if model.r_state['subgoal'][0,8] == 1:
                         is_terminal = True
+                    # if m_pred['modules_used'][0] == 8:
+                    #     is_terminal = True
 
                     # If we are switching submodules, then skip this step.
                     elif m_pred['action_low_names'][0] == cls.STOP_TOKEN:
