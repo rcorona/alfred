@@ -360,6 +360,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         actions = []
         masks = []
         attn_scores = []
+        modules_used = []
         if self.controller_type == 'attention':
             module_attn_scores = []
         else:
@@ -379,6 +380,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
             attn_scores.append(attn_score_t)
             if self.controller_type == 'attention':
                 module_attn_scores.append(module_attn_score_t)
+            # after squeezing, will be bsz x n_modules
+            modules_used.append(module_attn_t.squeeze(-1))
             if self.teacher_forcing and self.training:
                 w_t = gold[:, t]
             else:
@@ -390,7 +393,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
             'out_action_low_mask': torch.stack(masks, dim=1),
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'state_t': state_t,
-            'controller_state': controller_state_t
+            'controller_state': controller_state_t,
+            'modules_used': torch.stack(modules_used, dim=1)
         }
         if self.controller_type == 'attention':
             results['out_module_attn_scores'] = torch.cat(module_attn_scores, dim=1)
@@ -498,7 +502,7 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'out_subgoal': torch.stack(subgoals, dim=1),
             'out_progress': torch.stack(progresses, dim=1),
-            'state_t': state_t
+            'state_t': state_t,
         }
         return results
 
@@ -757,6 +761,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         actions = []
         masks = []
         attn_scores = []
+        modules_used = []
         if self.controller_type == 'attention':
             module_attn_scores = []
         else:
@@ -775,6 +780,8 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
             attn_scores.append(attn_score_t)
             if self.controller_type == 'attention':
                 module_attn_scores.append(module_attn_score_t)
+            # after squeezing, will be bsz x n_modules
+            modules_used.append(module_attn_t.squeeze(-1))
             if self.teacher_forcing and self.training:
                 w_t = gold[:, t]
             else:
@@ -786,7 +793,8 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
             'out_action_low_mask': torch.stack(masks, dim=1),
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'state_t': state_t,
-            'controller_state': controller_state_t
+            'controller_state': controller_state_t,
+            'modules_used': torch.stack(modules_used, dim=1)
         }
         if self.controller_type == 'attention':
             results['out_module_attn_scores'] = torch.cat(module_attn_scores, dim=1)

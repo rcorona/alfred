@@ -5,6 +5,7 @@ from PIL import Image
 from datetime import datetime
 from eval import Eval
 from env.thor_env import ThorEnv
+from copy import deepcopy
 
 from models.model.base import AlfredDataset, move_dict_to_cuda
 
@@ -15,7 +16,7 @@ class EvalTask(Eval):
     '''
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         '''
         evaluation loop
         '''
@@ -33,7 +34,7 @@ class EvalTask(Eval):
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))
-                cls.evaluate(env, model, r_idx, resnet, traj, args, lock, successes, failures, results)
+                cls.evaluate(env, model, r_idx, resnet, chunker_model, traj, args, lock, successes, failures, results)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -44,7 +45,7 @@ class EvalTask(Eval):
 
 
     @classmethod
-    def evaluate(cls, env, model, r_idx, resnet, traj_data, args, lock, successes, failures, results):
+    def evaluate(cls, env, model, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results):
         if args.model == "models.model.seq2seq_hierarchical":
             is_hierarchical = True
         elif args.model == "models.model.seq2seq_im_mask":
@@ -58,12 +59,28 @@ class EvalTask(Eval):
         reward_type = 'dense'
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
+        if chunker_model is not None:
+            # featurize is destructive, as serialize_lang_action flattens ['num']['lang_instr']
+            # TODO: unhack this
+            traj_data_chunker = deepcopy(traj_data)
+
         # extract language features
         feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
         # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
         feat = AlfredDataset.collate_fn([(None, feat)])[1]
         if args.gpu:
             move_dict_to_cuda(feat)
+
+        if chunker_model is not None:
+            assert is_hierarchical
+            assert model.args.hierarchical_controller == 'chunker'
+            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
+            module_idxs_per_subgoal = [
+                model.submodule_names.index(module_name)
+                for module_name in pred_submodules
+            ]
+        else:
+            module_idxs_per_subgoal = None
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']
@@ -84,7 +101,7 @@ class EvalTask(Eval):
 
             # forward model
             if is_hierarchical:
-                m_out = model.step(feat, oracle=args.oracle)
+                m_out = model.step(feat, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
             else:
                 if args.oracle:
                     raise NotImplementedError()
@@ -94,9 +111,9 @@ class EvalTask(Eval):
 
             if is_hierarchical:
                 # check if <<stop>> was predicted for both low-level and high-level controller.
-                # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
-                if m_pred['controller_attn'][0] == 8:
-                    print("\tpredicted STOP")
+                high_level_stop = m_pred['modules_used'][0] == 8
+                if high_level_stop:
+                    print("\tpredicted (or fed) NoOp")
                     break
 
                 # If we are switching submodules, then skip this step. 

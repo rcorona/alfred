@@ -20,7 +20,7 @@ class EvalSubgoals(Eval):
     ALL_SUBGOALS = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject']
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         '''
         evaluation loop
         '''
@@ -80,7 +80,7 @@ class EvalSubgoals(Eval):
                             traj, eval_idx, add_stop_in_subtrajectories=True,
                             filter_instructions=not args.trained_on_subtrajectories_full_instructions
                         )
-                    cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
+                    cls.evaluate(env, model, eval_idx, r_idx, resnet, chunker_model, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -90,7 +90,7 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
         if args.model == "models.model.seq2seq_hierarchical":
             is_hierarchical = True
         elif args.model == "models.model.seq2seq_im_mask":
@@ -128,6 +128,17 @@ class EvalSubgoals(Eval):
         if args.gpu:
             move_dict_to_cuda(feat)
 
+        if chunker_model is not None:
+            assert is_hierarchical
+            assert model.args.controller_type == 'chunker'
+            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data, args)
+            module_idxs_per_subgoal = [
+                model.submodule_names.index(module_name)
+                for module_name in pred_submodules
+            ]
+        else:
+            module_idxs_per_subgoal = None
+
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None
 
@@ -156,7 +167,9 @@ class EvalSubgoals(Eval):
                 # forward model
                 if not args.skip_model_unroll_with_expert:
                     if is_hierarchical:
-                        model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                        # TODO(dfried): check that passing module_idxs_per_subgoal doesn't have weird behavior e.g. with NoOps
+                        # and that subgoal_counter is what it should be
+                        model.step(feat, prev_action=prev_action, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
                     else:
                         model.step(feat, prev_action=prev_action)
                     prev_action = action['action'] if not args.no_teacher_force_unroll_with_expert else None

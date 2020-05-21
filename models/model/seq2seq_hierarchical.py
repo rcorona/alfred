@@ -290,7 +290,8 @@ class Module(Base):
             controller_state_0 = None
         frames = self.vis_dropout(feat['frames'])
         
-        # Get ground truth attention if provided. 
+        # Get ground truth attention if provided.
+        # this is provided both in train and in valid_seen and unseen
         if 'controller_attn_mask' in feat: 
             controller_mask = feat['controller_attn_mask']
         else: 
@@ -326,7 +327,7 @@ class Module(Base):
             'subgoal_counter': 0
         }
 
-    def step(self, feat, prev_action=None, oracle=False):
+    def step(self, feat, prev_action=None, oracle=False, module_idxs_per_subgoal=None):
         '''
         forward the model for a single time-step (used for real-time execution during eval)
         '''
@@ -344,13 +345,20 @@ class Module(Base):
             else:
                 self.r_state['controller_state_t'] = None
 
+        if oracle:
+            assert module_idxs_per_subgoal is None, "can't pass both module_idxs_per_subgoal and oracle=True"
+            # get rid of the batch dimension
+            module_idxs_per_subgoal = feat['module_idxs_per_subgoal'].squeeze(0)
+            assert module_idxs_per_subgoal.dim() == 1
+            module_idxs_per_subgoal = module_idxs_per_subgoal.tolist() # prevent indexing errors
+
         if self.r_state['subgoal_counter'] == 0:
 
             # Force subgoal module selection if using oracle. 
-            if oracle: 
+            if module_idxs_per_subgoal is not None:
                 controller_mask = torch.zeros(1, 9).float()
-                controller_mask[:,feat['module_idxs_per_subgoal'][0]] = 1.0
-                
+                controller_mask[:,module_idxs_per_subgoal[0]] = 1.0
+
                 if self.args.gpu:
                     controller_mask = controller_mask.cuda()
 
@@ -362,7 +370,15 @@ class Module(Base):
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
 
         # decode and save embedding and hidden states
-        out_action_low, out_action_low_mask, state_t, controller_state_t, _, controller_attn_logits, out_controller_attn = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'], controller_state_tm1=self.r_state['controller_state_t'], controller_mask=self.r_state['subgoal'])
+        out_action_low, out_action_low_mask, state_t, controller_state_t, _, controller_attn_logits, out_controller_attn = self.dec.step(
+            self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t,
+            state_tm1=self.r_state['state_t'], controller_state_tm1=self.r_state['controller_state_t'],
+            controller_mask=self.r_state['subgoal']
+        )
+        # out_controller_attn will always be a one-hot distribution. if self.r_state['subgoal'] = None, this will be
+        # the argmax of the distribution predicted by the attention-based controller. Otherwise, it will equal to self.r_state['subgoal']
+        # So, if we're running in an oracle setting or with module_idxs_per_subgoal, this will be the index of the module that was
+        # used for this step.
 
         # Get selected low-level action
         max_action_low = out_action_low.max(1)[1]
@@ -375,12 +391,10 @@ class Module(Base):
         if self.r_state['subgoal'] is None:
 
             # Either use max over attention or oracle subgoal selection. 
-            if oracle: 
-                max_subgoal = feat['module_idxs_per_subgoal'][self.r_state['subgoal_counter']]
-
+            if module_idxs_per_subgoal is not None:
+                max_subgoal = module_idxs_per_subgoal[self.r_state['subgoal_counter']]
             else:
                 # Only pay attention to a single module.
-                # TODO(dfried): fix this later with the instruction chunker
                 max_subgoal = controller_attn_logits.max(2)[1].squeeze()
                 
             module_attn = torch.zeros_like(out_controller_attn).view(1,-1)
@@ -398,6 +412,7 @@ class Module(Base):
         feat['out_action_low'] = out_action_low.unsqueeze(0)
         feat['out_action_low_mask'] = out_action_low_mask.unsqueeze(0)
         feat['out_module_attn_scores'] = out_controller_attn.view(1,1,9)
+        feat['modules_used'] = out_controller_attn
 
         return feat
 
@@ -420,8 +435,17 @@ class Module(Base):
                 alow = alow[:pad_start_idx]
                 alow_mask = alow_mask[:pad_start_idx]
             """
+
+            modules_used = feat['modules_used'].max(2)[1].tolist()[ix]
+            if clean_special_tokens:
+                # Stop after high-level controller stops.
+                if self.noop_index in modules_used:
+                    stop_start_idx = modules_used.index(self.noop_index)
+                    modules_used = modules_used[:stop_start_idx+1]
+
             if self.controller_type == 'attention':
-                controller_attn = feat['out_module_attn_scores'].max(2)[1][ix]
+                # TODO: out_module_attn_scores means different things when produced by dec.forward() and dec.step()
+                controller_attn = feat['out_module_attn_scores'].max(2)[1].tolist()[ix]
                 if clean_special_tokens:
 
                     # Stop each trajectory after high-level controller stops.
@@ -457,6 +481,7 @@ class Module(Base):
             pred[key] = {
                 'action_low_names': words,
                 'action_low_idxs': alow,
+                'modules_used': modules_used,
             }
             if self.controller_type == 'attention':
                 pred[key]['controller_attn'] = controller_attn # I think this has one element for each timestep, plus NoOp (stop)
