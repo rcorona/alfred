@@ -172,7 +172,10 @@ class EvalSubgoals(Eval):
                     if is_hierarchical:
                         # TODO(dfried): check that passing module_idxs_per_subgoal doesn't have weird behavior e.g. with NoOps
                         # and that subgoal_counter is what it should be
-                        model.step(feat, prev_action=prev_action, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
+                        model.step(feat, prev_action=prev_action, oracle=args.oracle,
+                                   module_idxs_per_subgoal=module_idxs_per_subgoal,
+                                   allow_submodule_stop=False,
+                                   force_submodule_stop=subgoal_completed)
                     else:
                         model.step(feat, prev_action=prev_action)
                     prev_action = action['action'] if not args.no_teacher_force_unroll_with_expert else None

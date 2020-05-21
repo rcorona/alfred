@@ -327,7 +327,7 @@ class Module(Base):
             'subgoal_counter': 0
         }
 
-    def step(self, feat, prev_action=None, oracle=False, module_idxs_per_subgoal=None):
+    def step(self, feat, prev_action=None, oracle=False, module_idxs_per_subgoal=None, allow_submodule_stop=True, force_submodule_stop=False):
         '''
         forward the model for a single time-step (used for real-time execution during eval)
         '''
@@ -384,7 +384,7 @@ class Module(Base):
         max_action_low = out_action_low.max(1)[1]
 
         # If current subgoal predicted stop, then change subgoal module.
-        if max_action_low == self.stop_token:
+        if force_submodule_stop or (allow_submodule_stop and max_action_low == self.stop_token):
             self.r_state['subgoal'] = None
 
         # Select next subgoal module to pay attention to.
