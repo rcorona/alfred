@@ -63,6 +63,7 @@ class Module(Base):
             decoder = vnn.ConvFrameMaskDecoderProgressMonitor
             
         elif args.indep_modules:
+            print("Indep Modules!")
             decoder = vnn.ConvFrameMaskDecoderModularIndependent
         else:
             decoder = vnn.ConvFrameMaskDecoderModular
@@ -279,8 +280,11 @@ class Module(Base):
             controller_mask = feat['controller_attn_mask']
         else: 
             controller_mask = None
+            
+        transition_mask = feat['transition_mask']
 
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, controller_state_0=controller_state_0, controller_mask=controller_mask)
+        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, controller_state_0=controller_state_0, 
+                       controller_mask=controller_mask, transition_mask=transition_mask)
         feat.update(res)
         return feat
 
@@ -423,7 +427,7 @@ class Module(Base):
             # print(len(p_mask))
             pred[key] = {
                 'action_low': alow,
-                # 'action_low_mask': p_mask,
+                #'action_low_mask': p_mask,
                 'controller_attn': controller_attn
             }
 

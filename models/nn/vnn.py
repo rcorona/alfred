@@ -546,10 +546,13 @@ class ConvFrameDecoder(nn.Module):
 
     
 class SubtaskModule(nn.Module):
-    def __init__(self,dhid, din, index, use_fc_nodes=False):
+    def __init__(self,dhid, din, index, use_fc_nodes=True):
         super().__init__()
         self.cell = nn.LSTMCell(din, dhid)
-        #self.fc_in = nn.Linear(dout, dh)
+        self.use_fc_nodes = use_fc_nodes
+        if self.use_fc_nodes:
+            self.fc_h_in = nn.Linear(dhid, dhid)
+            self.fc_h_out = nn.Linear(dhid, dhid)
         self.index = index
         
     def forward(self, x, controller_mask):
@@ -561,7 +564,34 @@ class SubtaskModule(nn.Module):
 
         return self.hx, self.cx
     
+    def forward(self, x, controller_mask, outer_h, transition_mask, next_transition_mask=None):
+        t_mask = transition_mask.unsqueeze(1)#[:, self.index].unsqueeze(1)
+        # If not transitioning, keep current mask, if transitioning, then replace h with translation of the input h.
+        #import pdb; pdb.set_trace()
+        if self.use_fc_nodes:
+            self.hx = self.hx*(1-t_mask) + self.fc_h_in(outer_h)*t_mask
+        else:
+            self.hx = self.hx*(1-t_mask) + outer_h*t_mask
+        
+        # If not transitioning, keep current cell, if transitioning, then replace c with initial state.
+        self.cx = self.cx*(1-t_mask) + self.state_0[1]*t_mask
+        
+        hx, cx  = self.cell(x, (self.hx, self.cx))
+        
+        # Only update state if selected
+        c_mask = controller_mask[:, self.index].unsqueeze(1)
+        self.cx = cx*c_mask + self.cx*(1-c_mask)
+        self.hx = hx*c_mask + self.hx*(1-c_mask)
+        
+        # if transitioning out, replace h with translation of h.
+        if next_transition_mask is not None:
+            if self.use_fc_nodes:
+                next_t_mask = next_transition_mask.unsqueeze(1)
+                self.hx = self.fc_h_out(self.hx)*next_t_mask + self.hx*(1-next_t_mask)
+        return self.hx, self.cx
+    
     def reset(self, state_0):
+        self.state_0 = state_0
         self.hx = state_0[0]
         self.cx = state_0[1]
     
@@ -572,7 +602,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
-                 teacher_forcing=False, n_modules=8, use_fc_nodes=False):
+                 teacher_forcing=False, n_modules=8, use_fc_nodes=True):
         super().__init__()
         demb = emb.weight.size(1)
 
@@ -607,7 +637,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask):
+    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask):
         # previous decoder hidden state for modules. 
         h_tm1 = state_tm1[0]
         module_ids = controller_mask.max(1)[1].squeeze()
@@ -635,7 +665,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
             inp_t.append(inp_ti.unsqueeze(1))
 
             # update hidden state
-            state_t = self.cell[i](inp_ti, controller_mask)
+            state_t = self.cell[i](inp_ti, controller_mask, state_tm1[0], transition_mask, next_transition_mask)
             state_t = [self.hstate_dropout(x) for x in state_t]
             h_t.append(state_t[0])
             c_t.append(state_t[1])
@@ -688,7 +718,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits.view(batch_sz,1,9), module_attn
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -708,8 +738,18 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
                 controller_mask_in = None
             else: 
                 controller_mask_in = controller_mask[:,t]
-
-            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
+                
+            transition_mask_in = transition_mask[:,t]
+            if t+1 < max_t:
+                next_transition_mask_in = transition_mask[:,t+1]
+            else:
+                next_transition_mask_in = None
+            #print("t", t, "mask", transition_mask_in)
+            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, 
+                                                                                                                        state_t, controller_state_t, 
+                                                                                                                        controller_mask_in, transition_mask_in,
+                                                                                                                        next_transition_mask_in
+                                                                                                                       )
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)
