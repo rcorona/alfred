@@ -412,7 +412,7 @@ class Module(Base):
         feat['out_action_low'] = out_action_low.unsqueeze(0)
         feat['out_action_low_mask'] = out_action_low_mask.unsqueeze(0)
         feat['out_module_attn_scores'] = out_controller_attn.view(1,1,9)
-        feat['modules_used'] = out_controller_attn
+        feat['modules_used'] = out_controller_attn.view(1,1,9)
 
         return feat
 
@@ -436,6 +436,8 @@ class Module(Base):
                 alow_mask = alow_mask[:pad_start_idx]
             """
 
+            # feat['modules_used']: batch x time x num_modules (different shape than out_module_attn_scores!)
+            assert feat['modules_used'].size(2) == len(self.submodule_names)
             modules_used = feat['modules_used'].max(2)[1].tolist()[ix]
             if clean_special_tokens:
                 # Stop after high-level controller stops.
