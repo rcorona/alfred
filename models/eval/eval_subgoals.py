@@ -236,7 +236,7 @@ class EvalSubgoals(Eval):
 
                     # If we are switching submodules, then skip this step.
                     elif m_pred['action_low_names'][0] == cls.STOP_TOKEN:
-                        continue
+                        is_terminal = True
                 else:
                     is_terminal = action in cls.TERMINAL_TOKENS
 
