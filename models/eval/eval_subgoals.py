@@ -128,6 +128,9 @@ class EvalSubgoals(Eval):
         if args.gpu:
             move_dict_to_cuda(feat)
 
+        if model.args.hierarchical_controller == 'chunker':
+            assert chunker_model is not None or args.oracle
+
         if chunker_model is not None:
             assert is_hierarchical
             assert model.args.controller_type == 'chunker'

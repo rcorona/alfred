@@ -71,6 +71,9 @@ class EvalTask(Eval):
         if args.gpu:
             move_dict_to_cuda(feat)
 
+        if model.args.hierarchical_controller == 'chunker':
+            assert chunker_model is not None
+
         if chunker_model is not None:
             assert is_hierarchical
             assert model.args.hierarchical_controller == 'chunker'
