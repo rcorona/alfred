@@ -66,6 +66,8 @@ class Module(Base):
         # subgoal monitoring
         self.subgoal_monitoring = (self.args.pm_aux_loss_wt > 0 or self.args.subgoal_aux_loss_wt > 0)
 
+        cloned_module_initialization = vars(args).get("cloned_module_initialization", False)
+
         # frame mask decoder
         if self.subgoal_monitoring:
             decoder = vnn.ConvFrameMaskDecoderProgressMonitor
@@ -81,7 +83,8 @@ class Module(Base):
                            actor_dropout=args.actor_dropout,
                            input_dropout=args.input_dropout,
                            teacher_forcing=args.dec_teacher_forcing,
-                           controller_type=self.controller_type) # TODO(dfried): add controller type for ConvFrameMaskDecoderProgressMonitor
+                           controller_type=self.controller_type,
+                           cloned_module_initialization=cloned_module_initialization) # TODO(dfried): add controller type for ConvFrameMaskDecoderProgressMonitor
 
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)

@@ -206,6 +206,10 @@ class ConvFrameMaskDecoder(nn.Module):
 
         return results
 
+def clone_module(module):
+    import pickle
+    return pickle.loads(pickle.dumps(module))
+
 class ConvFrameMaskDecoderModular(nn.Module):
     '''
     action decoder
@@ -213,10 +217,12 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
-                 teacher_forcing=False, n_modules=8, controller_type='attention'):
+                 teacher_forcing=False, n_modules=8, controller_type='attention',
+                 cloned_module_initialization=False):
         super().__init__()
         demb = emb.weight.size(1)
         self.controller_type = controller_type
+        self.cloned_module_initialization = cloned_module_initialization
 
         self.n_modules = n_modules
 
@@ -224,8 +230,17 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.pframe = pframe
         self.dhid = dhid
         self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
-        self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
-        self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
+        if cloned_module_initialization:
+            cell = nn.LSTMCell(dhid+dframe+demb, dhid)
+            self.cell = nn.ModuleList([clone_module(cell) for i in range(n_modules)])
+            attn = DotAttn()
+            self.attn = nn.ModuleList([clone_module(attn) for i in range(n_modules)])
+            h_tm1_fc = nn.Linear(dhid, dhid)
+            self.h_tm1_fc = nn.ModuleList([clone_module(h_tm1_fc) for i in range(n_modules)])
+        else:
+            self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
+            self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
+            self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 #         if self.use_fc_nodes:
 #             self.fc_nodes = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
         # High level controller.
@@ -254,7 +269,6 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.actor = nn.Linear(dhid+dhid+dframe+demb, demb)
         self.mask_dec = MaskDecoder(dhid=dhid+dhid+dframe+demb, pframe=self.pframe)
         self.teacher_forcing = teacher_forcing
-        self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
@@ -618,10 +632,12 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
-                 teacher_forcing=False, n_modules=8, use_fc_nodes=False, controller_type='attention'):
+                 teacher_forcing=False, n_modules=8, use_fc_nodes=False, controller_type='attention',
+                 cloned_module_initialization=False):
         super().__init__()
         demb = emb.weight.size(1)
         self.controller_type = controller_type
+        self.cloned_module_initialization = cloned_module_initialization
 
         self.n_modules = n_modules
 
@@ -631,6 +647,9 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
         self.cell = nn.ModuleList([SubtaskModule(din=dhid+dframe+demb, dhid=dhid, index=i, use_fc_nodes=use_fc_nodes) for i in range(n_modules)])
         self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
+        self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
+        if cloned_module_initialization:
+            raise NotImplementedError()
         # High level controller.
         if self.controller_type == 'attention':
             self.controller = nn.LSTMCell(dhid+dhid+dframe+demb, dhid)
@@ -656,7 +675,6 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         self.actor = nn.Linear(dhid+dhid+dframe+demb, demb)
         self.mask_dec = MaskDecoder(dhid=dhid+dhid+dframe+demb, pframe=self.pframe)
         self.teacher_forcing = teacher_forcing
-        self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 

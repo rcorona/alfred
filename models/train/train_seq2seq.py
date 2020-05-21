@@ -63,6 +63,7 @@ def make_parser():
     parser.add_argument('--lang_model', help='Type of language  modeling to use.', default='default', type=str, choices=['default', 'bert'])
     parser.add_argument('--indep-modules', help='uses independent submodules that keep their own hidden state', action='store_true')
     parser.add_argument('--hierarchical_controller', choices=['attention', 'chunker'], default='attention')
+    parser.add_argument('--cloned_module_initialization', help='initialize module parameters to the same values (but allow divergence in training)', action='store_true')
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')
