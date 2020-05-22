@@ -27,6 +27,7 @@ def add_data_args(parser):
 
     parser.add_argument('--train_on_subtrajectories', action='store_true', help='chop up full trajectories and instructions into subtrajectories')
     parser.add_argument('--train_on_subtrajectories_full_instructions', action='store_true', help='chop up full trajectories into subtrajectories, but keep the full instructions')
+    parser.add_argument('--add_stop_in_subtrajectories', action='store_true', help='Add STOP action at end of each subtrajectory.')
 
     # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
@@ -78,6 +79,7 @@ def make_parser():
 
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
+    parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")
