@@ -139,7 +139,7 @@ class BaselineModule(Base):
 
         return logits
 
-    def run_train(self, args=None):
+    def run_train(self, args=None, model_file):
         args = args or self.args
 
         # Loading Data
@@ -164,29 +164,42 @@ class BaselineModule(Base):
             print('Epoch', epoch)
             model.train()
             total_train_loss = 0
-            for batch in train_loader: # Should I enumerate data_loader? I assume the iterable doesn't reset after being called here
-                optimizer.zero_grad() # Zero grad?
+            total_train_acc = 0
+            total_train_size = 0
+            for batch in train_loader:
+                optimizer.zero_grad()
                 contexts, targets, labels = batch
                 logits = self.forward(contexts, targets)
                 loss = F.nll_loss(logits, labels)
                 total_train_loss += loss
+                total_train_size += labels.shape[0]
+                most_likely = torch.argmax(logits, dim=1)
+                acc = torch.eq(most_likely, labels)
+                total_train_acc += torch.sum(acc)
                 loss.backward()
                 optimizer.step()
+
             model.eval()
             total_valid_loss = 0
+            total_valid_acc = 0
+            total_valid_size = 0
             with torch.no_grad():
                 for batch in valid_loader:
                     contexts, targets, labels = batch
                     logits = self.forward(contexts, targets)
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
+                    total_valid_size += labels.shape[0]
+                    most_likely = torch.argmax(logits, dim=1)
+                    acc = torch.eq(most_likely, labels)
+                    total_valid_acc += torch.sum(acc)
 
             if total_valid_loss > best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, model_file))
                 torch.save(model.state_dict(), model_file)
                 best_loss = total_valid_loss
 
-        # Save model to where?
+            # TODO: Add tensorboardX logging
 
     def load_data_into_ram():
         '''
@@ -197,7 +210,7 @@ class BaselineModule(Base):
         with open(json_path) as f:
             raw_data = json.load(f)
 
-        # Turn data into array of [high_level, low_level_context, low_level_target]
+        # Turn data into array of [high_level, low_level_context, low_level_target, target_idx]
         split_data = []
         for key in raw_data.keys():
             for r_idx in range(len(raw_data[key]["high_level"])):
