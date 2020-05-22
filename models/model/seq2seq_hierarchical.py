@@ -49,7 +49,7 @@ class Module(Base):
         self.controller_type = vars(args).get('hierarchical_controller', 'attention')
         assert self.controller_type in {'attention', 'chunker'}, "invalid --hierarchical_controller {}".format(self.controller_type)
 
-        # TODO remove hardcoding and base on list of module names or something. 
+        # TODO remove hardcoding and base on list of module names or something.
         # n_modules = 8
 
         # Add high level vocab.
@@ -73,6 +73,7 @@ class Module(Base):
             decoder = vnn.ConvFrameMaskDecoderProgressMonitor
             
         elif args.indep_modules:
+            print("Indep Modules!")
             decoder = vnn.ConvFrameMaskDecoderModularIndependent
         else:
             decoder = vnn.ConvFrameMaskDecoderModular
@@ -300,9 +301,12 @@ class Module(Base):
         else: 
             controller_mask = None
 
+        transition_mask = feat['transition_mask']
+
         res = self.dec(
             enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0,
-            controller_state_0=controller_state_0, controller_mask=controller_mask
+            controller_state_0=controller_state_0, controller_mask=controller_mask,
+            transition_mask=transition_mask
         )
         feat.update(res)
         return feat
