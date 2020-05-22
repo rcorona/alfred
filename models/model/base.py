@@ -181,7 +181,6 @@ class AlfredDataset(Dataset):
             if curr_subgoal == 'NoOp' and not keep_noop:
                 continue
 
-
             # Keep the subgoal we're looking for.
             if subgoal_names is None or curr_subgoal in subgoal_names:
                 high_idx = subgoal['high_idx']
@@ -237,6 +236,12 @@ class AlfredDataset(Dataset):
         if add_stop_in_subtrajectories, then add a NoOp high-level action, with a <<stop>> low-level action, a copy of the last image, and the <<stop>> instruction
         '''
 
+        # Make subgoal pairs and single subgoal compatible with each other. 
+        if type(subgoal_index) == int: 
+            subgoal_index = set(subgoal_index)
+        elif type(subgoal_index) == tuple: 
+            subgoal_index = set(list(subgoal_index))
+
         # Use for counting dataset examples.
         #self.subgoal_count += len(valid_idx) - 1
         #self.trajectories_count += 1
@@ -265,7 +270,7 @@ class AlfredDataset(Dataset):
         if filter_instructions:
             data_cp['num']['lang_instr'] = [
                 instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
-                if a[0]['high_idx'] == subgoal_index
+                if a[0]['high_idx'] in subgoal_index
             ]
             if add_stop_in_subtrajectories:
                 # pull <<stop>> from the end of the original instruction
@@ -273,22 +278,25 @@ class AlfredDataset(Dataset):
                 data_cp['num']['lang_instr'].append(
                     data['num']['lang_instr'][-1]
                 )
-            data_cp['num']['lang_instr_subgoal_mask'] = [
-                np.full((len(instr),), 1, dtype=np.bool)
-                for instr in data_cp['num']['lang_instr']
-            ]
+
+            # Language instruction masks. 
+            lengths = [len(instr) for instr in data_cp['num']['lang_instr']]
+            total_len = sum(lengths)
+
+            data_cp['num']['lang_instr_subgoal_mask'] = np.full((total_len,), 1, dtype=np.bool).tolist()
+
         else:
             data_cp['num']['lang_instr_subgoal_mask'] = [
-                np.full((len(instr),), 1 if a[0]['high_idx'] == subgoal_index else 0, dtype=np.bool)
+                np.full((len(instr),), 1 if a[0]['high_idx'] in subgoal_index else 0, dtype=np.bool)
                 for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
             ]
 
         # Filter low level actions.
         data_cp['plan'] = data_cp['plan'].copy()
-        data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] == subgoal_index]
+        data_cp['plan']['low_actions'] = [a for a in data_cp['plan']['low_actions'] if a['high_idx'] in subgoal_index]
 
         # Filter images.
-        data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] == subgoal_index]
+        data_cp['images'] = [img for img in data_cp['images'] if img['high_idx'] in subgoal_index]
 
         # Fix image idx.
         low_idxs = sorted(list(set([img['low_idx'] for img in data_cp['images']])))
@@ -307,7 +315,7 @@ class AlfredDataset(Dataset):
         # for i in range(len(data_cp['num']['action_low'])):
         #     data_cp['num']['action_low'][i] = [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == idx]
         data_cp['num']['action_low'] = [
-            [a for a in data_cp['num']['action_low'][i] if a['high_idx'] == subgoal_index]
+            [a for a in data_cp['num']['action_low'][i] if a['high_idx'] in subgoal_index]
             for i in range(len(data_cp['num']['action_low']))
         ]
         data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
@@ -317,7 +325,7 @@ class AlfredDataset(Dataset):
         # if not len(data_cp['num']['action_low']) == 1:
         #     continue
 
-        assert(len(data_cp['num']['action_low']) == 1)
+        assert(len(data_cp['num']['action_low']) == 1 or len(data_cp['num']['action_low']) == 2)
 
         # old non-functional form
         # Extend low-level actions with stop action.
@@ -429,7 +437,7 @@ class AlfredDataset(Dataset):
 class AlfredSubtrajectoryDataset(AlfredDataset):
     def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None,
                  add_stop_in_subtrajectories=True,
-                 filter_instructions=True):
+                 filter_instructions=True, subgoal_pairs=False):
         """
         :param args:
         :param data:
@@ -443,6 +451,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
         self._task_and_indices = []
         self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
         self.filter_instructions = filter_instructions
+        self.subgoal_pairs = subgoal_pairs
 
         if len(data) > 1000:
             iter = tqdm.tqdm(data, ncols=80, desc='dataset: getting subgoals')
@@ -451,13 +460,30 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
 
         for datum in iter:
             task = AlfredDataset.load_task_json_unsplit(self.args, datum)
-            subgoal_indices = AlfredDataset.extract_subgoal_indices(
-                task, subgoal_names=subgoal_names, keep_noop=False
-            )
-            for ix in subgoal_indices:
-                self._task_and_indices.append((task, ix))
+            
+            # Either extract contiguous subgoal pairs. 
+            if subgoal_pairs: 
+        
+                # Get last high-level index. 
+                last_idx = task['plan']['high_pddl'][-1]['high_idx']
+
+                # Get all contiguous pairs before the NoOp action. 
+                pairs = [p for p in zip(range(0, last_idx), range(1, last_idx + 1))]
+                
+                # Add to dataset. 
+                for pair in pairs: 
+                    self._task_and_indices.append((task, pair))
+
+            # Or extract all subgoals of a particular type.
+            else: 
+                subgoal_indices = AlfredDataset.extract_subgoal_indices(
+                    task, subgoal_names=subgoal_names, keep_noop=False
+                )
+                for ix in subgoal_indices:
+                    self._task_and_indices.append((task, ix))
 
     def __getitem__(self, idx):
+        
         task, subgoal_index = self._task_and_indices[idx]
         old_task = json.dumps(task)
         task = AlfredDataset.filter_subgoal_index(
@@ -555,7 +581,8 @@ class BaseModule(nn.Module):
     def get_instance_key(self, instance):
         # return a unique identifier for the instance in the dataset
         # TODO: move this to AlfredDataset / AlfredSubtrajectoryDataset
-        return instance['task_id'], instance['repeat_idx'], instance['subgoal_idx']
+        subgoal_idx = None if instance['subgoal_idx'] is None else tuple(instance['subgoal_idx'])
+        return instance['task_id'], instance['repeat_idx'], subgoal_idx
 
     def forward(self, feat, max_decode=100):
         raise NotImplementedError()
@@ -648,10 +675,15 @@ class BaseModule(nn.Module):
             else:
                 subgoal_names = None
 
+            subgoal_pairs = args.subgoal_pairs
+            add_stop_in_subtrajectories = args.add_stop_in_subtrajectories
+
             full_instructions = vars(args).get('train_on_subtrajectories_full_instructions', False)
             dataset_constructor = lambda tasks: AlfredSubtrajectoryDataset(
                 args, tasks, self.__class__, False, subgoal_names=subgoal_names,
-                filter_instructions = not full_instructions
+                filter_instructions = not full_instructions,
+                add_stop_in_subtrajectories = add_stop_in_subtrajectories,
+                subgoal_pairs = subgoal_pairs
             )
         else:
             dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)

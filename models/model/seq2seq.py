@@ -164,6 +164,7 @@ class Module(BaseModule):
             # TODO: consider changing this to True?
             lang_goal_mask = [False] * len(lang_goal)
             lang_instr_mask = ex['num']['lang_instr_subgoal_mask']
+            
             assert len(lang_instr_mask) == len(lang_instr)
 
         # append goal + instr

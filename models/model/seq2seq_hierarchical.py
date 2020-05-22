@@ -177,7 +177,7 @@ class Module(Base):
             # Copy image frames to account for STOP action additions.
             new_frames = []
 
-            for i in range(len(feat['frames'])):
+            for i in range(len(transition_one_hot)):
 
                 # If in transition, additionally add the last frame from the last time step.
                 if transition_one_hot[i] == 1:
@@ -553,6 +553,7 @@ class Module(Base):
             # Evaluate low level actions.
             label_actions = self.vocab['action_low'].index2word(feat['action_low'].tolist())
             label_actions_no_stop = [ac for ac in label_actions if ac != '<<stop>>' and ac != '<<pad>>']
+            pdb.set_trace()
             assert label_actions_no_stop == [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
             pred_actions = preds[key]['action_low_names']
             pred_actions_no_stop = [ac for ac in pred_actions if ac != '<<stop>>' and ac != '<<pad>>']
