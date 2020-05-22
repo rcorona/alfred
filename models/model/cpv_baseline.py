@@ -129,6 +129,7 @@ class Module(Base):
 
         args = args or self.args
         self.writer = SummaryWriter('runs/baseline')
+        fsave = os.path.join(args.dout, 'best.pth')
 
         # Loading Data
         splits = self.load_data_into_ram()
@@ -151,9 +152,9 @@ class Module(Base):
         for epoch in range(args.epoch):
             print('Epoch', epoch)
             self.train()
-            total_train_loss = 0
-            total_train_acc = 0
-            total_train_size = 0
+            total_train_loss = torch.tensor(0, dtype=torch.float)
+            total_train_acc = torch.tensor(0, dtype=torch.float)
+            total_train_size = torch.tensor(0, dtype=torch.float)
             for batch in train_loader:
                 optimizer.zero_grad()
                 contexts, targets, labels = batch
@@ -167,15 +168,15 @@ class Module(Base):
                 total_train_acc += torch.sum(acc)
                 loss.backward()
                 optimizer.step()
-            self.writer.add_scalar('Accuracy/train', total_train_acc/total_train_size, epoch)
-            self.writer.add_scalar('Loss/train', total_train_loss, epoch)
-            print("Train Accuracy: " + str(total_train_acc/total_train_size))
-            print("Train Loss: " + str(total_train_loss))
+            self.writer.add_scalar('Accuracy/train', (total_train_acc/total_train_size).item(), epoch)
+            self.writer.add_scalar('Loss/train', total_train_loss.item(), epoch)
+            print("Train Accuracy: " + str((total_train_acc/total_train_size).item()))
+            print("Train Loss: " + str(total_train_loss.item()))
 
             self.eval()
-            total_valid_loss = 0
-            total_valid_acc = 0
-            total_valid_size = 0
+            total_valid_loss = torch.tensor(0, dtype=torch.float)
+            total_valid_acc = torch.tensor(0, dtype=torch.float)
+            total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
                     contexts, targets, labels = batch
@@ -187,15 +188,21 @@ class Module(Base):
                     most_likely = torch.argmax(logits, dim=1)
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
-                self.writer.add_scalar('Accuracy/validation', total_valid_acc/total_valid_size, epoch)
-                self.writer.add_scalar('Loss/validation', total_valid_loss, epoch)
-                print("Validation Accuracy: " + str(total_valid_acc/total_valid_size))
-                print("Validation Loss: " + str(total_valid_loss))
+                self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
+                self.writer.add_scalar('Loss/validation', total_valid_loss.item(), epoch)
+                print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
+                print("Validation Loss: " + str(total_valid_loss.item()))
 
             if total_valid_loss < best_loss:
-                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, args.dout))
-                torch.save(model.state_dict(), args.dout)
+                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
+                torch.save({
+                    'model': self.state_dict(),
+                    'optim': optimizer.state_dict(),
+                    'args': self.args,
+                    'vocab': self.vocab
+                }, fsave)
                 best_loss = total_valid_loss
+
 
 
             # Loss is going down but accuracy remains at zero
@@ -223,8 +230,5 @@ class Module(Base):
         return split_data
 
 
-# Input h,c are randomized/zero or should be prev (ZERO)
-# They have a vocab argument which I assume gives the vocab
-# Should I linearize hidden layer before output in encoder? (Assume don't have to cause hidden size is constant)
-
-# Do the featurizing in the training loop rather than in the dataset
+# Loss is going down but accuracy remains at zero
+# Switched from concatenation to sum of h for encoding - problem?
