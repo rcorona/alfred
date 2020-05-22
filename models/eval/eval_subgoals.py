@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+from copy import deepcopy
+
 import numpy as np
 from PIL import Image
 from datetime import datetime
@@ -104,6 +106,11 @@ class EvalSubgoals(Eval):
         reward_type = 'dense'
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
+        if chunker_model is not None:
+            # featurize is destructive, as serialize_lang_action flattens ['num']['lang_instr']
+            # TODO: unhack this
+            traj_data_chunker = deepcopy(traj_data)
+
         # expert demonstration to reach eval_idx-1
         expert_init_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] < eval_idx]
         expert_true_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] == eval_idx]
@@ -134,7 +141,7 @@ class EvalSubgoals(Eval):
         if chunker_model is not None:
             assert is_hierarchical
             assert model.args.controller_type == 'chunker'
-            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data, args)
+            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
             module_idxs_per_subgoal = [
                 model.submodule_names.index(module_name)
                 for module_name in pred_submodules
