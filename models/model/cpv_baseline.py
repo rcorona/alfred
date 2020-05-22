@@ -139,8 +139,10 @@ class BaselineModule(Base):
 
         return logits
 
-    def run_train(self, args=None, model_file):
+    def run_train(self, args=None):
+
         args = args or self.args
+        self.writer = SummaryWriter('runs/baseline')
 
         # Loading Data
         splits = load_data_into_ram()
@@ -160,7 +162,7 @@ class BaselineModule(Base):
 
         # Training loop
         best_loss = 1e10
-        for epoch in range(10):
+        for epoch in range(args.epoch):
             print('Epoch', epoch)
             model.train()
             total_train_loss = 0
@@ -178,6 +180,8 @@ class BaselineModule(Base):
                 total_train_acc += torch.sum(acc)
                 loss.backward()
                 optimizer.step()
+            self.writer.add_scalar('Accuracy/train', total_train_acc/total_train_size, epoch)
+            self.writer.add_scalar('Loss/train', total_train_loss, epoch)
 
             model.eval()
             total_valid_loss = 0
@@ -193,10 +197,12 @@ class BaselineModule(Base):
                     most_likely = torch.argmax(logits, dim=1)
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
+                self.writer.add_scalar('Accuracy/validation', total_valid_acc/total_valid_size, epoch)
+                self.writer.add_scalar('Loss/validation', total_valid_loss, epoch)
 
             if total_valid_loss > best_loss:
-                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, model_file))
-                torch.save(model.state_dict(), model_file)
+                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, args.dout))
+                torch.save(model.state_dict(), args.dout)
                 best_loss = total_valid_loss
 
             # TODO: Add tensorboardX logging
