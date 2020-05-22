@@ -8,6 +8,7 @@ from env.thor_env import ThorEnv
 from copy import deepcopy
 
 from models.model.base import AlfredDataset, move_dict_to_cuda
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 
 
 class EvalTask(Eval):
@@ -77,11 +78,14 @@ class EvalTask(Eval):
         if chunker_model is not None:
             assert is_hierarchical
             assert model.args.hierarchical_controller == 'chunker'
-            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
+            pred_modules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
             module_idxs_per_subgoal = [
                 model.submodule_names.index(module_name)
-                for module_name in pred_submodules
+                for module_name in pred_modules
             ]
+            true_modules = [model.submodule_names[ix] for ix in feat['module_idxs_per_subgoal'].squeeze(0).tolist()]
+            print("gold modules: {}".format(' '.join(true_modules)))
+            print("pred modules: {}".format(' '.join(pred_modules)))
         else:
             module_idxs_per_subgoal = None
 
@@ -190,6 +194,14 @@ class EvalTask(Eval):
                      'reward': float(reward),
                      'num_steps': t,
                      }
+        if is_hierarchical and chunker_model is not None:
+            log_entry['pred_modules'] = pred_modules
+            log_entry['true_modules'] = true_modules
+            log_entry['action_high_f1'] = compute_f1(true_modules, pred_modules)
+            log_entry['action_high_em'] = compute_exact(true_modules, pred_modules)
+            log_entry['action_high_gold_length'] = len(true_modules)
+            log_entry['action_high_pred_length'] = len(pred_modules)
+            log_entry['action_high_edit_distance'] = compute_edit_distance(true_modules, pred_modules)
         if success:
             successes.append(log_entry)
         else:
@@ -238,6 +250,18 @@ class EvalTask(Eval):
         print("avg steps (successes): %.3f" % (0 if not successes else success_num_steps / float(len(successes))))
         print("avg steps (failures): %.3f" % (0 if not failures else failure_num_steps / float(len(failures))))
         print("avg steps (overall): %.3f" % (total_num_steps / float(len(successes) + len(failures))))
+
+        if is_hierarchical and chunker_model is not None:
+            total_count = float(len(successes) + len(failures))
+            high_em = sum(entry['action_high_em'] for lst in [successes, failures] for entry in lst)
+            high_edit_distance = sum(entry['action_high_edit_distance'] for lst in [successes, failures] for entry in lst)
+            high_gold_len = sum(entry['action_high_gold_length'] for lst in [successes, failures] for entry in lst)
+            high_pred_len = sum(entry['action_high_pred_length'] for lst in [successes, failures] for entry in lst)
+            print("avg module EM: %.3f" % (high_em / total_count))
+            print("avg module edit distance: %.3f" % (high_edit_distance / total_count))
+            print("avg module gold length: %.3f" % (high_gold_len / total_count))
+            print("avg module pred length: %.3f" % (high_pred_len / total_count))
+
         print("-------------")
 
         lock.release()
