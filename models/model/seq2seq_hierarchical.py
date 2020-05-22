@@ -163,8 +163,9 @@ class Module(Base):
             # Extend each submodule to account for STOP action.
             feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
 
-            # Add High-level STOP action to high-level controller.
-            feat['module_idxs'][-1] = cls.noop_index
+            # Add High-level STOP action to high-level controller, but only if training on full trajectories. 
+            if not args.subgoal_pairs: 
+                feat['module_idxs'][-1] = cls.noop_index
 
             # Attention masks for high level controller.
             attn_mask = np.zeros((len(feat['module_idxs']), 9))
@@ -198,6 +199,11 @@ class Module(Base):
 
             # Get transition mask for training attention mechanism with STOP action in mind.
             feat['transition_mask'] = cls.get_transitions(feat['module_idxs'], first_subgoal=True) 
+
+            # Evaluate low level actions.
+            #label_actions = self.vocab['action_low'].index2word(feat['action_low'].tolist())
+            #label_actions_no_stop = [ac for ac in label_actions if ac != '<<stop>>' and ac != '<<pad>>']
+            #assert label_actions_no_stop == [a['discrete_action']['action'] for a in ex['plan']['low_actions']] 
 
         return feat
 
@@ -553,8 +559,7 @@ class Module(Base):
             # Evaluate low level actions.
             label_actions = self.vocab['action_low'].index2word(feat['action_low'].tolist())
             label_actions_no_stop = [ac for ac in label_actions if ac != '<<stop>>' and ac != '<<pad>>']
-            pdb.set_trace()
-            assert label_actions_no_stop == [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
+            #assert label_actions_no_stop == [a['discrete_action']['action'] for a in ex['plan']['low_actions']]
             pred_actions = preds[key]['action_low_names']
             pred_actions_no_stop = [ac for ac in pred_actions if ac != '<<stop>>' and ac != '<<pad>>']
 

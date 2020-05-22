@@ -284,7 +284,6 @@ class AlfredDataset(Dataset):
             total_len = sum(lengths)
 
             data_cp['num']['lang_instr_subgoal_mask'] = np.full((total_len,), 1, dtype=np.bool).tolist()
-
         else:
             data_cp['num']['lang_instr_subgoal_mask'] = [
                 np.full((len(instr),), 1 if a[0]['high_idx'] in subgoal_index else 0, dtype=np.bool)
@@ -317,7 +316,8 @@ class AlfredDataset(Dataset):
         data_cp['num']['action_low'] = [
             [a for a in data_cp['num']['action_low'][i] if a['high_idx'] in subgoal_index]
             for i in range(len(data_cp['num']['action_low']))
-        ]
+            ]
+
         data_cp['num']['action_low'] = [a for a in data_cp['num']['action_low'] if len(a) > 0]
 
         # assert len(data_cp['num']['action_low']) <= 1
@@ -467,9 +467,9 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
                 # Get last high-level index. 
                 last_idx = task['plan']['high_pddl'][-1]['high_idx']
 
-                # Get all contiguous pairs before the NoOp action. 
+                # Get all contiguous pairs of subgoals. 
                 pairs = [p for p in zip(range(0, last_idx), range(1, last_idx + 1))]
-                
+            
                 # Add to dataset. 
                 for pair in pairs: 
                     self._task_and_indices.append((task, pair))
@@ -518,7 +518,13 @@ class BaseModule(nn.Module):
             feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
             if 'lang_instr_subgoal_mask' in feat['num']:
                 # currently this is only added by the subtrajectory dataset
-                mask = [x for xs in feat['num']['lang_instr_subgoal_mask'] for x in xs]
+                
+                # TODO hack for compatibility with subtrajectories, fix. 
+                if type(feat['num']['lang_instr_subgoal_mask'][0]) == bool: 
+                    mask = feat['num']['lang_instr_subgoal_mask']
+                else: 
+                    mask = [x for xs in feat['num']['lang_instr_subgoal_mask'] for x in xs]
+    
                 feat['num']['lang_instr_subgoal_mask'] = mask
                 # check types
                 # took these out because the goal is prepended
