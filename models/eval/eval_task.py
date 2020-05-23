@@ -5,8 +5,10 @@ from PIL import Image
 from datetime import datetime
 from eval import Eval
 from env.thor_env import ThorEnv
+from copy import deepcopy
 
 from models.model.base import AlfredDataset, move_dict_to_cuda
+from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 
 
 class EvalTask(Eval):
@@ -15,7 +17,7 @@ class EvalTask(Eval):
     '''
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         '''
         evaluation loop
         '''
@@ -33,7 +35,7 @@ class EvalTask(Eval):
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))
-                cls.evaluate(env, model, r_idx, resnet, traj, args, lock, successes, failures, results)
+                cls.evaluate(env, model, r_idx, resnet, chunker_model, traj, args, lock, successes, failures, results)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -44,7 +46,7 @@ class EvalTask(Eval):
 
 
     @classmethod
-    def evaluate(cls, env, model, r_idx, resnet, traj_data, args, lock, successes, failures, results):
+    def evaluate(cls, env, model, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results):
         if args.model == "models.model.seq2seq_hierarchical":
             is_hierarchical = True
         elif args.model == "models.model.seq2seq_im_mask":
@@ -58,12 +60,34 @@ class EvalTask(Eval):
         reward_type = 'dense'
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
 
+        if chunker_model is not None:
+            # featurize is destructive, as serialize_lang_action flattens ['num']['lang_instr']
+            # TODO: unhack this
+            traj_data_chunker = deepcopy(traj_data)
+
         # extract language features
         feat = model.featurize(traj_data, model.args, test_mode=True, load_mask=False)
         # collate_fn expects a list of (task, feat) items, and returns (batch, feat)
         feat = AlfredDataset.collate_fn([(None, feat)])[1]
         if args.gpu:
             move_dict_to_cuda(feat)
+
+        if model.args.hierarchical_controller == 'chunker':
+            assert chunker_model is not None
+
+        if chunker_model is not None:
+            assert is_hierarchical
+            assert model.args.hierarchical_controller == 'chunker'
+            pred_modules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
+            module_idxs_per_subgoal = [
+                model.submodule_names.index(module_name)
+                for module_name in pred_modules
+            ]
+            true_modules = [model.submodule_names[ix] for ix in feat['module_idxs_per_subgoal'].squeeze(0).tolist()]
+            print("gold modules: {}".format(' '.join(true_modules)))
+            print("pred modules: {}".format(' '.join(pred_modules)))
+        else:
+            module_idxs_per_subgoal = None
 
         # goal instr
         goal_instr = traj_data['turk_annotations']['anns'][r_idx]['task_desc']
@@ -84,7 +108,7 @@ class EvalTask(Eval):
 
             # forward model
             if is_hierarchical:
-                m_out = model.step(feat, oracle=args.oracle)
+                m_out = model.step(feat, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
             else:
                 if args.oracle:
                     raise NotImplementedError()
@@ -94,9 +118,11 @@ class EvalTask(Eval):
 
             if is_hierarchical:
                 # check if <<stop>> was predicted for both low-level and high-level controller.
-                # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
-                if m_pred['controller_attn'][0] == 8:
-                    print("\tpredicted STOP")
+                # high_level_stop = m_pred['modules_used'][0] == 8
+                assert model.r_state['subgoal'].size() == (1,9)
+                high_level_stop = model.r_state['subgoal'][0,8] == 1
+                if high_level_stop:
+                    print("\tpredicted (or fed) NoOp")
                     break
 
                 # If we are switching submodules, then skip this step. 
@@ -168,6 +194,14 @@ class EvalTask(Eval):
                      'reward': float(reward),
                      'num_steps': t,
                      }
+        if is_hierarchical and chunker_model is not None:
+            log_entry['pred_modules'] = pred_modules
+            log_entry['true_modules'] = true_modules
+            log_entry['action_high_f1'] = compute_f1(true_modules, pred_modules)
+            log_entry['action_high_em'] = compute_exact(true_modules, pred_modules)
+            log_entry['action_high_gold_length'] = len(true_modules)
+            log_entry['action_high_pred_length'] = len(pred_modules)
+            log_entry['action_high_edit_distance'] = compute_edit_distance(true_modules, pred_modules)
         if success:
             successes.append(log_entry)
         else:
@@ -216,6 +250,18 @@ class EvalTask(Eval):
         print("avg steps (successes): %.3f" % (0 if not successes else success_num_steps / float(len(successes))))
         print("avg steps (failures): %.3f" % (0 if not failures else failure_num_steps / float(len(failures))))
         print("avg steps (overall): %.3f" % (total_num_steps / float(len(successes) + len(failures))))
+
+        if is_hierarchical and chunker_model is not None:
+            total_count = float(len(successes) + len(failures))
+            high_em = sum(entry['action_high_em'] for lst in [successes, failures] for entry in lst)
+            high_edit_distance = sum(entry['action_high_edit_distance'] for lst in [successes, failures] for entry in lst)
+            high_gold_len = sum(entry['action_high_gold_length'] for lst in [successes, failures] for entry in lst)
+            high_pred_len = sum(entry['action_high_pred_length'] for lst in [successes, failures] for entry in lst)
+            print("avg module EM: %.3f" % (high_em / total_count))
+            print("avg module edit distance: %.3f" % (high_edit_distance / total_count))
+            print("avg module gold length: %.3f" % (high_gold_len / total_count))
+            print("avg module pred length: %.3f" % (high_pred_len / total_count))
+
         print("-------------")
 
         lock.release()

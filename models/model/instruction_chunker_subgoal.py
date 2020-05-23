@@ -3,6 +3,8 @@ import random
 import tqdm
 import collections
 
+from typing import List
+
 import numpy as np
 import torch
 from torch import nn
@@ -135,20 +137,19 @@ class SubgoalChunker(BaseModule):
         lang_instr = ex['num']['lang_instr']
         feat['lang_instr'] = lang_instr
         feat['lang_instr_len'] = len(lang_instr)
-        if not test_mode:
-            sub_instr_lengths = ex['num']['sub_instr_lengths']
-            assert sum(sub_instr_lengths) == len(lang_instr)
-            chunk_tags = torch.full((len(lang_instr),), cls.PAD_ID, dtype=torch.long)
-            pos = 0
-            for ix, length in enumerate(sub_instr_lengths):
-                submodule_name = ex['plan']['high_pddl'][ix]['discrete_action']['action']
-                chunk_tags[pos] = cls.SUBMODULE_TO_BEGIN_INDICES[submodule_name]
-                chunk_tags[pos+1:pos+length] = cls.SUBMODULE_TO_INSIDE_INDICES[submodule_name]
-                pos += length
-                if ix == len(sub_instr_lengths) - 1:
-                    break
-            assert pos == len(lang_instr)
-            feat['chunk_tags'] = chunk_tags
+        sub_instr_lengths = ex['num']['sub_instr_lengths']
+        assert sum(sub_instr_lengths) == len(lang_instr)
+        chunk_tags = torch.full((len(lang_instr),), cls.PAD_ID, dtype=torch.long)
+        pos = 0
+        for ix, length in enumerate(sub_instr_lengths):
+            submodule_name = ex['plan']['high_pddl'][ix]['discrete_action']['action']
+            chunk_tags[pos] = cls.SUBMODULE_TO_BEGIN_INDICES[submodule_name]
+            chunk_tags[pos+1:pos+length] = cls.SUBMODULE_TO_INSIDE_INDICES[submodule_name]
+            pos += length
+            if ix == len(sub_instr_lengths) - 1:
+                break
+        assert pos == len(lang_instr)
+        feat['chunk_tags'] = chunk_tags
 
         return feat
 
@@ -231,6 +232,18 @@ class SubgoalChunker(BaseModule):
         dist = LinearChainCRF(edge_potentials, lengths=feat['lang_instr_len'])
         feat.update({'out_chunk_dist': dist})
         return feat
+
+    def subtask_sequence(self, preds, ensure_noop_at_end=False):
+        chunk_tag_indices: List[int] = preds['chunk_tags']
+        labels = []
+        for tag_index in chunk_tag_indices:
+            if tag_index in SubgoalChunker.BEGIN_INDICES_TO_SUBMODULE:
+                labels.append(SubgoalChunker.BEGIN_INDICES_TO_SUBMODULE[tag_index])
+            else:
+                assert tag_index in SubgoalChunker.INSIDE_INDICES_TO_SUBMODULE or tag_index == SubgoalChunker.PAD_ID, "invalid tag index {}".format(tag_index)
+        if ensure_noop_at_end and labels[-1] != "NoOp":
+            labels.append("NoOp")
+        return labels
 
     def extract_preds(self, out, batch, feat):
         pred = {}

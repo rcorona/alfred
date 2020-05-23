@@ -17,12 +17,15 @@ class EvalHierarchical(Eval):
     '''
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         '''
         evaluation loop
         '''
         # start THOR
         env = ThorEnv()
+
+        if chunker_model is not None:
+            raise NotImplementedError()
 
         while True:
             if task_queue.qsize() == 0:
@@ -35,7 +38,7 @@ class EvalHierarchical(Eval):
                 r_idx = task['repeat_idx']
                 print("Evaluating: %s" % (traj['root']))
                 print("No. of trajectories left: %d" % (task_queue.qsize()))
-                cls.evaluate(env, model, r_idx, resnet, traj, args, lock, successes, failures, results)
+                cls.evaluate(env, model, r_idx, resnet, chunker_model, traj, args, lock, successes, failures, results)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -46,9 +49,12 @@ class EvalHierarchical(Eval):
 
 
     @classmethod
-    def evaluate(cls, env, model, r_idx, resnet, traj_data, args, lock, successes, failures, results):
+    def evaluate(cls, env, model, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results):
         # reset model
         model.reset()
+
+        if chunker_model is not None:
+            raise NotImplementedError()
 
         # setup scene
         reward_type = 'dense'
@@ -88,6 +94,7 @@ class EvalHierarchical(Eval):
             m_pred = model.extract_preds(m_out, [traj_data], feat, clean_special_tokens=False, return_masks=True)
             m_pred = list(m_pred.values())[0]
 
+            # TODO(dfried): use the instruction_chunker
             # check if <<stop>> was predicted for both low-level and high-level controller.
             if m_pred['controller_attn'][0] == 8: 
                 print("\tpredicted STOP")

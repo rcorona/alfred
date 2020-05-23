@@ -5,6 +5,8 @@ import time
 from datetime import timedelta
 import torch
 import torch.multiprocessing as mp
+
+from models.model.base import AlfredDataset, move_dict_to_cuda
 from models.nn.resnet import Resnet
 from data.preprocess import Dataset
 from importlib import import_module
@@ -37,6 +39,20 @@ class Eval(object):
         self.model.args.dout = self.args.model_path.replace(self.args.model_path.split('/')[-1], '')
         self.model.args.data = self.args.data if self.args.data else self.model.args.data
 
+        if self.args.hierarchical_controller_chunker_model_path:
+            from models.model.instruction_chunker_subgoal import SubgoalChunker
+            self.chunker_model, optimizer = SubgoalChunker.load(self.args.hierarchical_controller_chunker_model_path)
+            self.chunker_model.share_memory()
+            self.chunker_model.eval()
+
+            # updated args
+            self.chunker_model.args.dout = self.args.hierarchical_controller_chunker_model_path.replace(
+                self.args.hierarchical_controller_chunker_model_path.split('/')[-1], ''
+            )
+            self.chunker_model.args.data = self.args.data if self.args.data else self.chunker_model.args.data
+        else:
+            self.chunker_model = None
+
         # preprocess and save
         if args.preprocess:
             print("\nPreprocessing dataset and saving to %s folders ... This is will take a while. Do this once as required:" % self.model.args.pp_folder)
@@ -51,6 +67,9 @@ class Eval(object):
         # gpu
         if self.args.gpu:
             self.model = self.model.to(torch.device('cuda'))
+
+            if self.chunker_model is not None:
+                self.chunker_model = self.chunker_model.to(torch.device('cuda'))
 
         # success and failure lists
         self.create_stats()
@@ -91,7 +110,7 @@ class Eval(object):
         lock = self.manager.Lock()
         if self.args.num_threads > 1:
             for n in range(self.args.num_threads):
-                thread = mp.Process(target=self.run, args=(self.model, self.resnet, task_queue, self.args, lock,
+                thread = mp.Process(target=self.run, args=(self.model, self.resnet, self.chunker_model, task_queue, self.args, lock,
                                                            self.successes, self.failures, self.results))
                 thread.start()
                 threads.append(thread)
@@ -99,7 +118,7 @@ class Eval(object):
             for t in threads:
                 t.join()
         else:
-            self.run(self.model, self.resnet, task_queue, self.args, lock, self.successes, self.failures, self.results)
+            self.run(self.model, self.resnet, self.chunker_model, task_queue, self.args, lock, self.successes, self.failures, self.results)
 
         # save
         self.save_results()
@@ -131,12 +150,26 @@ class Eval(object):
         env.set_task(traj_data, args, reward_type=reward_type)
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         raise NotImplementedError()
 
     @classmethod
-    def evaluate(cls, env, model, r_idx, resnet, traj_data, args, lock, successes, failures):
+    def evaluate(cls, env, model, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results):
         raise NotImplementedError()
+
+    @classmethod
+    def predict_submodules_from_chunker(cls, chunker_model, traj_data, args):
+        feat = chunker_model.featurize(traj_data, chunker_model.args, test_mode=True)
+        feat = AlfredDataset.collate_fn([(None, feat)])[1]
+        if args.gpu:
+            move_dict_to_cuda(feat)
+
+        out = chunker_model.forward(feat)
+        preds = chunker_model.extract_preds(out, [traj_data], feat)
+        assert len(preds) == 1
+        single_preds = next(iter(preds.values()))
+        pred_submodules = chunker_model.subtask_sequence(single_preds, ensure_noop_at_end=True)
+        return pred_submodules
 
     def save_results(self):
         raise NotImplementedError()

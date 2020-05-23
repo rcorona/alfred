@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+from copy import deepcopy
+
 import numpy as np
 from PIL import Image
 from datetime import datetime
@@ -20,7 +22,7 @@ class EvalSubgoals(Eval):
     ALL_SUBGOALS = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject']
 
     @classmethod
-    def run(cls, model, resnet, task_queue, args, lock, successes, failures, results):
+    def run(cls, model, resnet, chunker_model, task_queue, args, lock, successes, failures, results):
         '''
         evaluation loop
         '''
@@ -80,7 +82,7 @@ class EvalSubgoals(Eval):
                             traj, eval_idx, add_stop_in_subtrajectories=True,
                             filter_instructions=not args.trained_on_subtrajectories_full_instructions
                         )
-                    cls.evaluate(env, model, eval_idx, r_idx, resnet, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
+                    cls.evaluate(env, model, eval_idx, r_idx, resnet, chunker_model, traj, args, lock, successes, failures, results, subgoal_filtered_traj_data)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -90,7 +92,7 @@ class EvalSubgoals(Eval):
         env.stop()
 
     @classmethod
-    def evaluate(cls, env, model, eval_idx, r_idx, resnet, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
+    def evaluate(cls, env, model, eval_idx, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
         if args.model == "models.model.seq2seq_hierarchical":
             is_hierarchical = True
         elif args.model == "models.model.seq2seq_im_mask":
@@ -103,6 +105,11 @@ class EvalSubgoals(Eval):
         # setup scene
         reward_type = 'dense'
         cls.setup_scene(env, traj_data, r_idx, args, reward_type=reward_type)
+
+        if chunker_model is not None:
+            # featurize is destructive, as serialize_lang_action flattens ['num']['lang_instr']
+            # TODO: unhack this
+            traj_data_chunker = deepcopy(traj_data)
 
         # expert demonstration to reach eval_idx-1
         expert_init_actions = [a['discrete_action'] for a in traj_data['plan']['low_actions'] if a['high_idx'] < eval_idx]
@@ -127,6 +134,20 @@ class EvalSubgoals(Eval):
         feat = AlfredDataset.collate_fn([(None, feat)])[1]
         if args.gpu:
             move_dict_to_cuda(feat)
+
+        if model.args.hierarchical_controller == 'chunker':
+            assert chunker_model is not None or args.oracle
+
+        if chunker_model is not None:
+            assert is_hierarchical
+            assert model.args.controller_type == 'chunker'
+            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
+            module_idxs_per_subgoal = [
+                model.submodule_names.index(module_name)
+                for module_name in pred_submodules
+            ]
+        else:
+            module_idxs_per_subgoal = None
 
         # previous action for teacher-forcing during expert execution (None is used for initialization)
         prev_action = None
@@ -156,7 +177,12 @@ class EvalSubgoals(Eval):
                 # forward model
                 if not args.skip_model_unroll_with_expert:
                     if is_hierarchical:
-                        model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                        # TODO(dfried): check that passing module_idxs_per_subgoal doesn't have weird behavior e.g. with NoOps
+                        # and that subgoal_counter is what it should be
+                        model.step(feat, prev_action=prev_action, oracle=args.oracle,
+                                   module_idxs_per_subgoal=module_idxs_per_subgoal,
+                                   allow_submodule_stop=False,
+                                   force_submodule_stop=subgoal_completed)
                     else:
                         model.step(feat, prev_action=prev_action)
                     prev_action = action['action'] if not args.no_teacher_force_unroll_with_expert else None
@@ -181,7 +207,7 @@ class EvalSubgoals(Eval):
                     must_stop = False
                 # forward model
                 if is_hierarchical:
-                    m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle)
+                    m_out = model.step(feat, prev_action=prev_action, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
                 else:
                     m_out = model.step(feat, prev_action=prev_action)
                 # traj_data is only used to get the keys returned in m_pred
@@ -209,13 +235,15 @@ class EvalSubgoals(Eval):
                 if is_hierarchical:
                     is_terminal = False
                     # check if <<stop>> was predicted for both low-level and high-level controller.
-                    # TODO: this allows the high-level controller to terminate the low-level, even if the low-level isn't done
-                    if m_pred['controller_attn'][0] == 8:
+                    assert model.r_state['subgoal'].size() == (1,9)
+                    if model.r_state['subgoal'][0,8] == 1:
                         is_terminal = True
+                    # if m_pred['modules_used'][0] == 8:
+                    #     is_terminal = True
 
                     # If we are switching submodules, then skip this step.
                     elif m_pred['action_low_names'][0] == cls.STOP_TOKEN:
-                        continue
+                        is_terminal = True
                 else:
                     is_terminal = action in cls.TERMINAL_TOKENS
 
