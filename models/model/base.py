@@ -426,11 +426,16 @@ class AlfredDataset(Dataset):
             bsz, t = feat['action_low'].size()
             bsz_, t_, *_ = feat['frames'].size()
             assert bsz == bsz_
+
             while t != t_:
-                feat['frames'] = torch.cat((
-                    feat['frames'], feat['frames'][:,-1].unsqueeze(1)
-                ),dim=1)
-                t_ = feat['frames'].size(1)
+                if t > t_: 
+                    feat['frames'] = torch.cat((
+                        feat['frames'], feat['frames'][:,-1].unsqueeze(1)
+                    ),dim=1)
+                    t_ = feat['frames'].size(1)
+                else: 
+                    feat['frames'] = feat['frames'][:,:-1]
+                    t_ = feat['frames'].size(1)
 
         return (batch, feat)
 
