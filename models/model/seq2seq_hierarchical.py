@@ -142,7 +142,8 @@ class Module(Base):
             for i, name in enumerate(module_names):
                 if name == 'NoOp':
                     assert i == len(module_names) - 1, 'NoOp found before end of the high level sequence'
-            module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for.
+            #NoOp has been added to module list, should resolve to correct index through name. 
+            #module_names = [a if a != 'NoOp' else 'GotoLocation' for a in module_names] # No-op action will not be used, use index we actually have submodule for.
             module_idxs = [cls.submodule_names.index(name) for name in module_names]
 
             feat['module_idxs'] = np.array(module_idxs)
@@ -155,7 +156,7 @@ class Module(Base):
 
             # Inject STOP action at each transition point.
             feat['action_low'] = np.insert(feat['action_low'], transition_idxs, 2)
-            feat['action_low'][-1] = cls.pad
+            feat['action_low'][-1] = 2
 
             # Get submodule idxs right before transition points.
             vals = feat['module_idxs'][transition_idxs - 1]
@@ -163,9 +164,10 @@ class Module(Base):
             # Extend each submodule to account for STOP action.
             feat['module_idxs'] = np.insert(feat['module_idxs'], transition_idxs, vals)
 
-            # Add High-level STOP action to high-level controller, but only if training on full trajectories. 
-            if not args.subgoal_pairs: 
-                feat['module_idxs'][-1] = cls.noop_index
+            # NoOP added back above, don't need this? 
+            # Add High-level STOP action to high-level controller. 
+            #if not args.subgoal_pairs: 
+                #feat['module_idxs'][-1] = cls.noop_index
 
             # Attention masks for high level controller.
             attn_mask = np.zeros((len(feat['module_idxs']), 9))

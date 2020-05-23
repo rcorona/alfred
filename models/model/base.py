@@ -469,7 +469,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
 
                 # Get all contiguous pairs of subgoals. 
                 pairs = [p for p in zip(range(0, last_idx), range(1, last_idx + 1))]
-            
+           
                 # Add to dataset. 
                 for pair in pairs: 
                     self._task_and_indices.append((task, pair))
@@ -485,6 +485,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
     def __getitem__(self, idx):
         
         task, subgoal_index = self._task_and_indices[idx]
+        
         old_task = json.dumps(task)
         task = AlfredDataset.filter_subgoal_index(
             task,
@@ -499,6 +500,13 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
             feat = self.model_class.featurize(task, self.args, self.test_mode)
         else:
             feat = None
+
+        """ Used for debugging. 
+        pdb.set_trace()
+
+        if task['plan']['high_pddl'][-1]['high_idx'] in subgoal_index: 
+            pdb.set_trace()
+        """
 
         return (task, feat)
 

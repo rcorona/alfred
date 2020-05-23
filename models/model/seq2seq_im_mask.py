@@ -79,7 +79,7 @@ class Module(Base):
             # low-level action mask
             if load_mask:
                 feat['action_low_mask'] = [cls.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None]
-        
+
         return feat
 
     def forward(self, feat, max_decode=300):
