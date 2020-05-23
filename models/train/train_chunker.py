@@ -41,6 +41,9 @@ def make_parser():
     parser.add_argument('--lr', help='optimizer learning rate', default=1e-4, type=float)
     parser.add_argument('--decay_epoch', help='num epoch to adjust learning rate', default=10, type=int)
 
+    # Custom parameters.
+    parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
+
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")
 
