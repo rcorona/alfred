@@ -42,6 +42,7 @@ def make_parser():
     parser.add_argument('--decay_epoch', help='num epoch to adjust learning rate', default=10, type=int)
 
     # Custom parameters.
+    parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
     parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')

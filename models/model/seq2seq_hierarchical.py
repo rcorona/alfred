@@ -197,7 +197,13 @@ class Module(Base):
                 if transition_one_hot[i] == 1:
                     new_frames.append(feat['frames'][i-1])
 
-                new_frames.append(feat['frames'][i])
+                # Determine which frame to add (accounting for rare SliceObject discrepancy). 
+                if i >= len(feat['frames']): 
+                    frame = feat['frames'][-1]
+                else: 
+                    frame = feat['frames'][i]
+
+                new_frames.append(frame)
 
             feat['frames'] = np.stack(new_frames)
             # feat['frames'] = torch.stack(new_frames)
