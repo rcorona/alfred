@@ -663,7 +663,7 @@ class SubtaskModule(nn.Module):
                 next_t_mask = next_t_mask.float()
                 hx = self.fc_h_out(self.hx)*next_t_mask+ self.hx*(1-next_t_mask)
                 self.hx = hx*c_mask + self.hx*(1-c_mask)
-        return self.hx * c_mask + h*(1-c_mask)
+        return self.hx * c_mask 
         
 class ConvFrameMaskDecoderModularIndependent(nn.Module):
     '''
@@ -733,12 +733,14 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         c_t = []
         inp_t = []
         
-        
+        transition_mask = transition_mask.float()
+        controller_mask = controller_mask.float()
         # Do outer translation:
         if transition_mask.sum() > 0:
-            new_h = state_tm1[0]
+            new_h = state_tm1[0]*(1-transition_mask.unsqueeze(1))
             for i in range  (self.n_modules): 
-                new_h += self.cell[i].translate_out(h, translation_mask, controller_mask)
+                new_h += self.cell[i].translate_out(state_tm1[0], transition_mask, controller_mask)*transition_mask.unsqueeze(1)
+            state_tm1 = (new_h, state_tm1[1])
 
         # Iterate over each module. 
         for i in range  (self.n_modules): 
@@ -858,7 +860,6 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
                 transition_mask_in = idx==2
             elif t+1 < max_t:
                 transition_mask_in = transition_mask[:,t+1]
-            import pdb; pdb.set_trace()
             
             masks.append(mask_t)
             actions.append(action_t)
