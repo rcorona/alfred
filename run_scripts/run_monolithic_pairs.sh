@@ -11,7 +11,7 @@ name=monolithic_dhid:${dhid}
 
 out_dir="exp_pairs/${name}"
 
-mkdir $out_dir 2> /dev/null
+mkdir -p $out_dir 2> /dev/null
 
 python -u models/train/train_seq2seq.py \
   --data data/json_feat_2.1.0 \
