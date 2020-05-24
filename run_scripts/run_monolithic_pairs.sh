@@ -26,5 +26,6 @@ python -u models/train/train_seq2seq.py \
   --dhid $dhid \
   --num_workers 8 \
   --print_git \
+  --train_on_subtrajectories \
   --subgoal_pairs \
   | tee ${out_dir}/stdout.log

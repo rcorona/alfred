@@ -45,5 +45,6 @@ python -u models/train/train_seq2seq.py \
   --hstate_dropout $hstate_dropout \
   --actor_dropout $actor_dropout \
   --hierarchical_controller chunker \
+  --train_on_subtrajectories \
   --subgoal_pairs \
   | tee ${out_dir}/stdout.log
