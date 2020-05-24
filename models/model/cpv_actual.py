@@ -39,8 +39,8 @@ class AlfredBaselineDataset(Dataset):
         tensorize and pad batch input
         '''
 
-        high_level = torch.tensor(ex["high_level"])
-        low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]]
+        high_level = torch.tensor(ex["high_level"]).to(self.device)
+        low_level_context = [torch.tensor(ll).to(self.device) for ll in ex["low_level_context"]]
         target_idx = random.randrange(len(low_level_context))
         low_level_target = low_level_context[target_idx]
         del low_level_context[target_idx]
@@ -68,39 +68,40 @@ class AlfredBaselineDataset(Dataset):
             contexts = []
             targets = []
             labels = []
-            lengths = torch.tensor([len(batch[idx][1]) for idx in range(batch_size)], dtype=torch.long)
+            lengths = torch.tensor([len(batch[idx][1]) for idx in range(batch_size)], dtype=torch.long).to(self.device)
+            all_sorted_lengths = []
             longest_seq = 0
             for idx in range(batch_size):
                 longest_seq = max(longest_seq, max([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))]))
             for idx in range(batch_size):
                 highs.append(batch[idx][0])
-                padded_contexts = torch.zeros((len(batch[idx][1]), longest_seq))
-                context_lengths = torch.tensor([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))])
+                padded_contexts = torch.zeros((len(batch[idx][1]), longest_seq), dtype=torch.long).to(self.device)
+                context_lengths = torch.tensor([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))], dtype=torch.long).to(self.device)
                 for seq_idx in range(len(batch[idx][1])):
                     padded_contexts[seq_idx, :batch[idx][1][seq_idx].shape[0]] = batch[idx][1][seq_idx]
                 sorted_lengths, sort_idx = torch.sort(context_lengths, 0, descending=True)
                 sorted_contexts = padded_contexts[sort_idx]
 
-                packed_padded_contexts = pack_padded_sequence(sorted_contexts, sorted_lengths, batch_first=True)
-                print(packed_padded_contexts.shape)
-                contexts.append(packed_padded_contexts.data)
+                # packed_padded_contexts = pack_padded_sequence(sorted_contexts, sorted_lengths, batch_first=True)
+                # contexts.append(packed_padded_contexts.data)
+                all_sorted_lengths.append(sorted_lengths)
+                contexts.append(sorted_contexts)
                 targets.append(batch[idx][2])
-                labels.append(torch.tensor(idx).unsqueeze(0))
+                labels.append(torch.tensor(idx).unsqueeze(0).to(self.device))
 
-            print(len(contexts))
+            padded_lengths = pad_sequence(all_sorted_lengths, batch_first=True, padding_value=longest_seq)
             packed_contexts = pad_sequence(contexts, batch_first=True)
-            print(packed_contexts.shape)
-            padded_highs = pad_sequence(highs)
-            padded_targets = pad_sequence(targets)
+            padded_highs = pad_sequence(highs, batch_first=True)
+            padded_targets = pad_sequence(targets, batch_first=True)
             padded_labels = torch.cat(labels, dim=0)
 
             # padded_contexts = torch.zeros((batch_size, lengths.max(), longest_seq), dtype=torch.long)
-            mask = torch.zeros((batch_size, lengths.max(), self.args.demb), dtype=torch.long)
+            mask = torch.zeros((batch_size, lengths.max(), self.args.dhid), dtype=torch.long).to(self.device)
             for idx in range(batch_size):
                 # padded_contexts[idx, :lengths[idx], :longest_seq] = contexts[idx]
-                mask[idx, :lengths[idx], :self.args.demb] = torch.ones((lengths[idx], self.args.demb))
+                mask[idx, :lengths[idx], :self.args.dhid] = torch.ones((lengths[idx], self.args.dhid)).to(self.device)
 
-            return (padded_highs, packed_contexts, padded_targets, padded_labels, mask)
+            return (padded_highs, packed_contexts, padded_targets, padded_labels, padded_lengths, mask)
         return collate_fn
 
 
@@ -123,38 +124,45 @@ class Module(Base):
         self.to(self.device)
 
 
-    def encoder(self, batch):
+    def encoder(self, batch, batch_size):
         '''
         Input: stacked tensor of [high_level, seq, low_level_context]
         '''
 
-        embedded = self.embed(torch.transpose(batch, 0, 1))
+        # embedded = self.embed(torch.transpose(batch, 0, 1))
         # Input h,c are randomized/zero or should be prev
-        h_0 = torch.zeros(2, embedded.shape[0], self.args.dhid).to(self.device)
-        c_0 = torch.zeros(2, embedded.shape[0], self.args.dhid).to(self.device)
-        out, (h, c) = self.enc(embedded, (h_0, c_0))
+        h_0 = torch.zeros(2, batch_size, self.args.dhid).to(self.device)
+        c_0 = torch.zeros(2, batch_size, self.args.dhid).to(self.device)
+        out, (h, c) = self.enc(batch, (h_0, c_0))
         torch.sum(h, dim=0)
 
         # Add small feed forward/projection layer + ReLU?
         return torch.sum(h, dim=0)
 
-    def forward(self, highs, contexts, targets, mask):
+    def forward(self, highs, contexts, targets, lengths, mask):
         '''
         Takes in contexts and targets and returns the dot product of each enc(high) - enc(context) with each enc(target)
         '''
         batch_size = contexts.shape[1]
         num_low_levels = contexts.shape[0]
-        enc_highs = self.encoder(highs) # B x Emb
-        print(contexts.shape)
-        flat_contexts = torch.reshape(contexts, (contexts.shape[0]*contexts.shape[1], contexts.shape[2]))
 
-        enc_contexts = self.encoder(torch.transpose(flat_contexts, 0, 1)) # B * N x Emb
-        enc_targets = self.encoder(targets) # C x Emb
+        embed_highs = self.embed(highs)
+        enc_highs = self.encoder(embed_highs, highs.shape[0]) # B x Emb
+
+        embed_contexts = self.embed(contexts)
+
+        flat_contexts = torch.reshape(embed_contexts, (embed_contexts.shape[0]*embed_contexts.shape[1], embed_contexts.shape[2], embed_contexts.shape[3]))
+        flat_lengths = torch.reshape(lengths, (lengths.shape[0]*lengths.shape[1],))
+
+        packed_contexts = pack_padded_sequence(flat_contexts, flat_lengths, batch_first=True, enforce_sorted=False)
+        enc_contexts = self.encoder(packed_contexts, embed_contexts.shape[0]*embed_contexts.shape[1]) # B * N x Emb
         full_enc_contexts = enc_contexts.reshape(num_low_levels, batch_size, -1) # N x B x Emb
-        trans_enc_contexts = torch.transpose(full_enc_contexts, 0, 1) # B x N x Emb
-        masked_enc_contexts = torch.einsum('ijk, ijk -> ijk', trans_enc_contexts, mask) # B x N x Emb
+        masked_enc_contexts = torch.einsum('ijk, ijk -> ijk', full_enc_contexts, mask) # B x N x Emb
         summed_contexts = torch.sum(masked_enc_contexts, dim=1)  # B x Emb
         comb_contexts = enc_highs - summed_contexts
+
+        embed_targets = self.embed(targets)
+        enc_targets = self.encoder(embed_targets, targets.shape[0]) # C x Emb
         sim_m = torch.matmul(comb_contexts, torch.transpose(enc_targets, 0, 1)) # N x C
         logits = F.log_softmax(sim_m, dim = 1)
 
@@ -192,13 +200,14 @@ class Module(Base):
             total_train_size = torch.tensor(0, dtype=torch.float)
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, mask = batch
-                highs = highs.to(self.device)
-                contexts = contexts.to(self.device)
-                targets = targets.to(self.device)
-                labels = labels.to(self.device)
-                mask = mask.to(self.device)
-                logits = self.forward(highs, contexts, targets, mask)
+                highs, contexts, targets, labels, lengths, mask = batch
+                # highs = highs.to(self.device)
+                # contexts = contexts.to(self.device)
+                # targets = targets.to(self.device)
+                # labels = labels.to(self.device)
+                # lengths = lengths.to(self.device)
+                # mask = mask.to(self.device)
+                logits = self.forward(highs, contexts, targets, lengths, mask)
                 loss = F.nll_loss(logits, labels)
                 total_train_loss += loss
                 total_train_size += labels.shape[0]
@@ -218,13 +227,14 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels, mask = batch
-                    highs = highs.to(self.device)
-                    contexts = contexts.to(self.device)
-                    targets = targets.to(self.device)
-                    labels = labels.to(self.device)
-                    mask = mask.to(self.device)
-                    logits = self.forward(highs, contexts, targets, mask)
+                    highs, contexts, targets, labels, lengths, mask = batch
+                    # highs = highs.to(self.device)
+                    # contexts = contexts.to(self.device)
+                    # targets = targets.to(self.device)
+                    # labels = labels.to(self.device)
+                    # lengths = lengths.to(self.device)
+                    # mask = mask.to(self.device)
+                    logits = self.forward(highs, contexts, targets, lengths, mask)
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
                     total_valid_size += labels.shape[0]

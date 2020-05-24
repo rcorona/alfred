@@ -39,13 +39,14 @@ class AlfredBaselineDataset(Dataset):
         tensorize and pad batch input
         '''
 
-        high_level = torch.tensor(ex["high_level"])
-        low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]]
-        low_level_target = torch.tensor(ex["low_level_target"]).to(self.device)
-        padded_context = torch.cat([high_level] + [torch.tensor(self.seg).unsqueeze(0)] + low_level_context, dim=0).to(self.device)
-        label = torch.tensor(ex["target_id"]).to(self.device)
+        high_level = torch.tensor(ex["high_level"]).to(self.device)
+        low_level_context = [torch.tensor(ll).to(self.device) for ll in ex["low_level_context"]]
+        target_idx = random.randrange(len(low_level_context))
+        low_level_target = low_level_context[target_idx]
+        del low_level_context[target_idx]
+        padded_context = torch.cat([high_level] + [torch.tensor(self.seg).unsqueeze(0).to(self.device)] + low_level_context, dim=0)
 
-        return (padded_context, low_level_target, label)
+        return (padded_context, low_level_target)
 
     def __getitem__(self, idx):
 
@@ -60,22 +61,25 @@ class AlfredBaselineDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-def collate_fn(batch):
-    batch_size = len(batch)
+    def collate(self):
+        def collate_fn(batch):
+            batch_size = len(batch)
 
-    contexts = []
-    targets = []
-    labels = []
-    for idx in range(batch_size):
-        contexts.append(batch[idx][0])
-        targets.append(batch[idx][1])
-        labels.append(torch.tensor(idx).unsqueeze(0))
+            contexts = []
+            targets = []
+            labels = []
+            for idx in range(batch_size):
+                contexts.append(batch[idx][0])
+                targets.append(batch[idx][1])
+                labels.append(torch.tensor(idx).unsqueeze(0).to(self.device))
 
-    padded_contexts = pad_sequence(contexts)
-    padded_targets = pad_sequence(targets)
-    padded_labels = torch.cat(labels, dim=0)
+            padded_contexts = pad_sequence(contexts)
+            padded_targets = pad_sequence(targets)
+            padded_labels = torch.cat(labels, dim=0)
 
-    return (padded_contexts, padded_targets, padded_labels)
+            return (padded_contexts, padded_targets, padded_labels)
+
+        return collate_fn
 
 
 
@@ -120,7 +124,6 @@ class Module(Base):
         enc_contexts = self.encoder(contexts) # N x Emb
         enc_targets = self.encoder(targets) # C x Emb
         sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # N x C
-        # Twice the size it should be
         logits = F.log_softmax(sim_m, dim = 1)
 
         return logits
@@ -141,8 +144,8 @@ class Module(Base):
         eval_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in eval_idx])
         train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
 
-        valid_loader = DataLoader(valid_dataset, batch_size=128, shuffle=True, collate_fn=collate_fn)
-        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate_fn)
+        valid_loader = DataLoader(valid_dataset, batch_size=128, shuffle=True, collate_fn=valid_dataset.collate())
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=train_dataset.collate())
 
         # Optimizer
         optimizer = optimizer or torch.optim.Adam(self.parameters(), lr=args.lr)
@@ -158,7 +161,6 @@ class Module(Base):
             for batch in train_loader:
                 optimizer.zero_grad()
                 contexts, targets, labels = batch
-                labels = labels.to(self.device)
                 logits = self.forward(contexts, targets)
                 loss = F.nll_loss(logits, labels)
                 total_train_loss += loss
@@ -180,7 +182,6 @@ class Module(Base):
             with torch.no_grad():
                 for batch in valid_loader:
                     contexts, targets, labels = batch
-                    labels = labels.to(self.device)
                     logits = self.forward(contexts, targets)
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
@@ -222,10 +223,7 @@ class Module(Base):
             for r_idx in range(len(raw_data[key]["high_level"])):
                 high_level = raw_data[key]["high_level"][r_idx]
                 low_levels = raw_data[key]["low_level"][r_idx]
-                target_idx = random.randrange(len(low_levels))
-                target = low_levels[target_idx]
-                del low_levels[target_idx]
-                split_data += [{"high_level": high_level, "low_level_context": low_levels, "low_level_target": target, "target_id": target_idx}]
+                split_data += [{"high_level": high_level, "low_level_context": low_levels}]
 
         return split_data
 
