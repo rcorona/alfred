@@ -626,7 +626,7 @@ class SubtaskModule(nn.Module):
     #
     #     return self.hx, self.cx
     
-    def forward(self, x, controller_mask, outer_h, transition_mask, next_transition_mask=None):
+    def forward(self, x, controller_mask, outer_h, transition_mask):
         t_mask = transition_mask.unsqueeze(1) #[:, self.index].unsqueeze(1)
         t_mask = t_mask.float()
         # If not transitioning, keep current mask, if transitioning, then replace h with translation of the input h.
@@ -647,12 +647,7 @@ class SubtaskModule(nn.Module):
         self.cx = cx*c_mask + self.cx*(1-c_mask)
         self.hx = hx*c_mask + self.hx*(1-c_mask)
 
-        # if transitioning out, replace h with translation of h.
-        if next_transition_mask is not None:
-            if self.use_fc_nodes:
-                next_t_mask = next_transition_mask.unsqueeze(1)
-                next_t_mask = next_t_mask.float()
-                self.hx = self.fc_h_out(self.hx)*next_t_mask + self.hx*(1-next_t_mask)
+
         return self.hx, self.cx
 
     def reset(self, state_0):
@@ -660,6 +655,16 @@ class SubtaskModule(nn.Module):
         self.hx = state_0[0]
         self.cx = state_0[1]
     
+    def translate_out(self, h, translation_mask, controller_mask):
+        # if transitioning out and this module was active, replace h with translation of h.
+        c_mask = controller_mask[:, self.index].unsqueeze(1)
+        if self.use_fc_nodes:
+                next_t_mask = translation_mask.unsqueeze(1)
+                next_t_mask = next_t_mask.float()
+                hx = self.fc_h_out(self.hx)*next_t_mask+ self.hx*(1-next_t_mask)
+                self.hx = hx*c_mask + self.hx*(1-c_mask)
+        return self.hx * c_mask + h*(1-c_mask)
+        
 class ConvFrameMaskDecoderModularIndependent(nn.Module):
     '''
     action decoder
@@ -713,7 +718,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask):
+    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, prev_controller_mask):
         # previous decoder hidden state for modules. 
         h_tm1 = state_tm1[0]
         module_ids = controller_mask.max(1)[1].squeeze()
@@ -727,6 +732,13 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         h_t = []
         c_t = []
         inp_t = []
+        
+        
+        # Do outer translation:
+        if transition_mask.sum() > 0:
+            new_h = state_tm1[0]
+            for i in range  (self.n_modules): 
+                new_h += self.cell[i].translate_out(h, translation_mask, controller_mask)
 
         # Iterate over each module. 
         for i in range  (self.n_modules): 
@@ -741,7 +753,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
             inp_t.append(inp_ti.unsqueeze(1))
 
             # update hidden state
-            state_t = self.cell[i](inp_ti, controller_mask, state_tm1[0], transition_mask, next_transition_mask)
+            state_t = self.cell[i](inp_ti, controller_mask, state_tm1[0], transition_mask)
             state_t = [self.hstate_dropout(x) for x in state_t]
             h_t.append(state_t[0])
             c_t.append(state_t[1])
@@ -803,6 +815,7 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
     def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None):
+        print("forward")
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -838,6 +851,15 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
                                                                                                                         controller_mask_in, transition_mask_in,
                                                                                                                         next_transition_mask_in
                                                                                                                        )
+            
+            if transition_mask is None:
+                # Manually get transition mask by checking for action=2 (Stop)
+                _, idx =  action_t.max(dim=1)
+                transition_mask_in = idx==2
+            elif t+1 < max_t:
+                transition_mask_in = transition_mask[:,t+1]
+            import pdb; pdb.set_trace()
+            
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)
