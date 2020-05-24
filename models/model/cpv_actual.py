@@ -41,11 +41,12 @@ class AlfredBaselineDataset(Dataset):
 
         high_level = torch.tensor(ex["high_level"])
         low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]]
-        low_level_target = torch.tensor(ex["low_level_target"])
-        padded_context = pad_sequence(low_level_context)
-        label = torch.tensor(ex["target_id"])
+        target_idx = random.randrange(len(low_level_context))
+        low_level_target = low_level_context[target_idx]
+        del low_level_context[target_idx]
+        # padded_context = pad_sequence(low_level_context)
 
-        return (high_level, padded_context, low_level_target, label)
+        return (high_level, low_level_context, low_level_target)
 
     def __getitem__(self, idx):
 
@@ -59,30 +60,48 @@ class AlfredBaselineDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-def collate_fn(batch):
-    batch_size = len(batch)
+    def collate(self):
+        def collate_fn(batch):
+            batch_size = len(batch)
 
-    highs = []
-    contexts = []
-    targets = []
-    labels = []
-    longest_context = 0
-    for idx in range(batch_size):
-        if batch[idx][1].shape[1] > longest_context:
-            longest_context = batch[idx][1].shape[1]
-    for idx in range(batch_size):
-        highs.append(batch[idx][0])
-        padded_context = torch.cat((batch[idx][1], torch.zeros(batch[idx][1].shape[0], longest_context - batch[idx][1].shape[1], dtype=torch.long)), dim=1)
-        contexts.append(padded_context)
-        targets.append(batch[idx][2])
-        labels.append(torch.tensor(idx).unsqueeze(0))
+            highs = []
+            contexts = []
+            targets = []
+            labels = []
+            lengths = torch.tensor([len(batch[idx][1]) for idx in range(batch_size)], dtype=torch.long)
+            longest_seq = 0
+            for idx in range(batch_size):
+                longest_seq = max(longest_seq, max([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))]))
+            for idx in range(batch_size):
+                highs.append(batch[idx][0])
+                padded_contexts = torch.zeros((len(batch[idx][1]), longest_seq))
+                context_lengths = torch.tensor([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))])
+                for seq_idx in range(len(batch[idx][1])):
+                    padded_contexts[seq_idx, :batch[idx][1][seq_idx].shape[0]] = batch[idx][1][seq_idx]
+                sorted_lengths, sort_idx = torch.sort(context_lengths, 0, descending=True)
+                sorted_contexts = padded_contexts[sort_idx]
 
-    padded_highs = pad_sequence(highs)
-    padded_contexts = pad_sequence(contexts)
-    padded_targets = pad_sequence(targets)
-    padded_labels = torch.cat(labels, dim=0)
+                packed_padded_contexts = pack_padded_sequence(sorted_contexts, sorted_lengths, batch_first=True)
+                print(packed_padded_contexts.shape)
+                contexts.append(packed_padded_contexts.data)
+                targets.append(batch[idx][2])
+                labels.append(torch.tensor(idx).unsqueeze(0))
 
-    return (padded_highs, padded_contexts, padded_targets, padded_labels)
+            print(len(contexts))
+            packed_contexts = pad_sequence(contexts, batch_first=True)
+            print(packed_contexts.shape)
+            padded_highs = pad_sequence(highs)
+            padded_targets = pad_sequence(targets)
+            padded_labels = torch.cat(labels, dim=0)
+
+            # padded_contexts = torch.zeros((batch_size, lengths.max(), longest_seq), dtype=torch.long)
+            mask = torch.zeros((batch_size, lengths.max(), self.args.demb), dtype=torch.long)
+            for idx in range(batch_size):
+                # padded_contexts[idx, :lengths[idx], :longest_seq] = contexts[idx]
+                mask[idx, :lengths[idx], :self.args.demb] = torch.ones((lengths[idx], self.args.demb))
+
+            return (padded_highs, packed_contexts, padded_targets, padded_labels, mask)
+        return collate_fn
 
 
 
@@ -119,20 +138,22 @@ class Module(Base):
         # Add small feed forward/projection layer + ReLU?
         return torch.sum(h, dim=0)
 
-    def forward(self, highs, contexts, targets):
+    def forward(self, highs, contexts, targets, mask):
         '''
         Takes in contexts and targets and returns the dot product of each enc(high) - enc(context) with each enc(target)
         '''
         batch_size = contexts.shape[1]
         num_low_levels = contexts.shape[0]
         enc_highs = self.encoder(highs) # B x Emb
+        print(contexts.shape)
         flat_contexts = torch.reshape(contexts, (contexts.shape[0]*contexts.shape[1], contexts.shape[2]))
 
         enc_contexts = self.encoder(torch.transpose(flat_contexts, 0, 1)) # B * N x Emb
         enc_targets = self.encoder(targets) # C x Emb
         full_enc_contexts = enc_contexts.reshape(num_low_levels, batch_size, -1) # N x B x Emb
-        trans_enc_contexts = torch.transpose(full_enc_contexts, 0, 1)  # B x N x Emb
-        summed_contexts = torch.sum(trans_enc_contexts, dim=1)  # B x Emb
+        trans_enc_contexts = torch.transpose(full_enc_contexts, 0, 1) # B x N x Emb
+        masked_enc_contexts = torch.einsum('ijk, ijk -> ijk', trans_enc_contexts, mask) # B x N x Emb
+        summed_contexts = torch.sum(masked_enc_contexts, dim=1)  # B x Emb
         comb_contexts = enc_highs - summed_contexts
         sim_m = torch.matmul(comb_contexts, torch.transpose(enc_targets, 0, 1)) # N x C
         logits = F.log_softmax(sim_m, dim = 1)
@@ -155,8 +176,8 @@ class Module(Base):
         eval_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in eval_idx])
         train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
 
-        valid_loader = DataLoader(valid_dataset, batch_size=self.args.batch, shuffle=True, collate_fn=collate_fn)
-        train_loader = DataLoader(train_dataset, batch_size=self.args.batch, shuffle=True, collate_fn=collate_fn)
+        valid_loader = DataLoader(valid_dataset, batch_size=self.args.batch, shuffle=True, collate_fn=valid_dataset.collate())
+        train_loader = DataLoader(train_dataset, batch_size=self.args.batch, shuffle=True, collate_fn=train_dataset.collate())
 
         # Optimizer
         optimizer = optimizer or torch.optim.Adam(self.parameters(), lr=args.lr)
@@ -171,12 +192,13 @@ class Module(Base):
             total_train_size = torch.tensor(0, dtype=torch.float)
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels = batch
+                highs, contexts, targets, labels, mask = batch
                 highs = highs.to(self.device)
                 contexts = contexts.to(self.device)
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
-                logits = self.forward(highs, contexts, targets)
+                mask = mask.to(self.device)
+                logits = self.forward(highs, contexts, targets, mask)
                 loss = F.nll_loss(logits, labels)
                 total_train_loss += loss
                 total_train_size += labels.shape[0]
@@ -196,12 +218,13 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels = batch
+                    highs, contexts, targets, labels, mask = batch
                     highs = highs.to(self.device)
                     contexts = contexts.to(self.device)
                     targets = targets.to(self.device)
                     labels = labels.to(self.device)
-                    logits = self.forward(highs, contexts, targets)
+                    mask = mask.to(self.device)
+                    logits = self.forward(highs, contexts, targets, mask)
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
                     total_valid_size += labels.shape[0]
@@ -242,10 +265,8 @@ class Module(Base):
             for r_idx in range(len(raw_data[key]["high_level"])):
                 high_level = raw_data[key]["high_level"][r_idx]
                 low_levels = raw_data[key]["low_level"][r_idx]
-                target_idx = random.randrange(len(low_levels))
-                target = low_levels[target_idx]
-                del low_levels[target_idx]
-                split_data += [{"high_level": high_level, "low_level_context": low_levels, "low_level_target": target, "target_id": target_idx}]
+
+                split_data += [{"high_level": high_level, "low_level_context": low_levels}]
 
         return split_data
 
