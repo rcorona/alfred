@@ -95,7 +95,7 @@ class Chunker(BaseModule):
         debug = {}
         assert data
         for ex, feat in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             lang_instr_flat = [
                 self.vocab['word'].index2word(index)
                 for index in ex['num']['lang_instr']
@@ -158,7 +158,7 @@ class Chunker(BaseModule):
         chunk_tag_mask = (feat['chunk_tags'] == self.PAD_ID)
         assert len(batch) == feat['out_chunk_tags'].size(0) == feat['chunk_tags'].size(0)
         for ex_ix, ex in enumerate(batch):
-            key = ex['task_id'], ex['repeat_idx']
+            key = self.get_instance_key(ex)
 
             pred_tag_logits = feat['out_chunk_tags'][ex_ix]
             true_tags = feat['chunk_tags'][ex_ix]
@@ -187,9 +187,10 @@ class Chunker(BaseModule):
     def compute_metric(self, preds, data):
         m = collections.defaultdict(list)
         for ex, feat in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             gold_tags = feat['chunk_tags']
             pred_tags = preds[key]['chunk_tags']
+            assert len(gold_tags) == feat['lang_instr_len']
             assert len(gold_tags) == len(pred_tags)
             m['chunk_tag_acc'].append(compute_acc(gold_tags, pred_tags))
 

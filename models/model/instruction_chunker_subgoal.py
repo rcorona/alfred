@@ -19,6 +19,7 @@ from torch_struct import LinearChainCRF
 
 from models.model.base import embed_packed_sequence
 from models.model.instruction_chunker import compute_acc
+from models.utils.helper_utils import safe_zip
 from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 
 
@@ -138,18 +139,21 @@ class SubgoalChunker(BaseModule):
         feat['lang_instr'] = lang_instr
         feat['lang_instr_len'] = len(lang_instr)
         sub_instr_lengths = ex['num']['sub_instr_lengths']
+        sub_instr_high_indices = ex['num']['sub_instr_high_indices']
         assert sum(sub_instr_lengths) == len(lang_instr)
         chunk_tags = torch.full((len(lang_instr),), cls.PAD_ID, dtype=torch.long)
         pos = 0
-        for ix, length in enumerate(sub_instr_lengths):
-            submodule_name = ex['plan']['high_pddl'][ix]['discrete_action']['action']
+        for high_idx, length in safe_zip(sub_instr_high_indices, sub_instr_lengths):
+            submodule_name = ex['plan']['high_pddl'][high_idx]['discrete_action']['action']
             chunk_tags[pos] = cls.SUBMODULE_TO_BEGIN_INDICES[submodule_name]
             chunk_tags[pos+1:pos+length] = cls.SUBMODULE_TO_INSIDE_INDICES[submodule_name]
             pos += length
-            if ix == len(sub_instr_lengths) - 1:
-                break
         assert pos == len(lang_instr)
         feat['chunk_tags'] = chunk_tags
+
+        has_no_op = cls.SUBMODULE_TO_BEGIN_INDICES['NoOp'] in feat['chunk_tags']
+        if has_no_op:
+            assert (feat['lang_instr'][-1] == 34) # 34 is index of <<stop>>
 
         return feat
 
@@ -186,7 +190,7 @@ class SubgoalChunker(BaseModule):
         debug = {}
         assert data
         for ex, feat in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             lang_instr_flat = [
                 self.vocab['word'].index2word(index)
                 for index in ex['num']['lang_instr']
@@ -196,7 +200,7 @@ class SubgoalChunker(BaseModule):
 
             gold_chunk_tag_indices = gold_chunk_tags.cpu().tolist()
 
-            debug['{}--{}'.format(*key)] = {
+            debug['--'.join(map(str,key))] = {
                 'lang_instr': lang_instr_flat,
                 'pred_chunk_tag_indices': pred_chunk_tags,
                 'gold_chunk_tag_indices': gold_chunk_tag_indices,
@@ -254,10 +258,12 @@ class SubgoalChunker(BaseModule):
         assert len(batch) == pred_labels.size(0) == feat['chunk_tags'].size(0)
 
         for ex_ix, ex in enumerate(batch):
-            key = ex['task_id'], ex['repeat_idx']
+            key = self.get_instance_key(ex)
 
             instr_len = feat['lang_instr_len'][ex_ix]
             pred_tags = pred_labels[ex_ix][:instr_len].cpu().tolist()
+
+            assert len(pred_tags) == instr_len
 
             pred[key] = {
                 'chunk_tags': pred_tags,
@@ -284,9 +290,11 @@ class SubgoalChunker(BaseModule):
     def compute_metric(self, preds, data):
         m = collections.defaultdict(list)
         for ex, feat in data:
-            key = (ex['task_id'], ex['repeat_idx'])
+            key = self.get_instance_key(ex)
             gold_tags = feat['chunk_tags'].cpu().tolist()
             pred_tags = preds[key]['chunk_tags']
+
+            assert len(gold_tags) == feat['lang_instr_len']
             assert len(gold_tags) == len(pred_tags)
             m['chunk_tag_acc'].append(compute_acc(gold_tags, pred_tags))
 

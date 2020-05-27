@@ -177,7 +177,6 @@ class AlfredDataset(Dataset):
         for subgoal in task_data['plan']['high_pddl']:
 
             curr_subgoal = subgoal['discrete_action']['action']
-
             if curr_subgoal == 'NoOp' and not keep_noop:
                 continue
 
@@ -236,8 +235,8 @@ class AlfredDataset(Dataset):
         if add_stop_in_subtrajectories, then add a NoOp high-level action, with a <<stop>> low-level action, a copy of the last image, and the <<stop>> instruction
         '''
 
-        # Make subgoal pairs and single subgoal compatible with each other. 
-        if type(subgoal_index) == int: 
+        # Make subgoal pairs and single subgoal compatible with each other.
+        if type(subgoal_index) == int:
             subgoal_index = set(subgoal_index)
         elif type(subgoal_index) == tuple: 
             subgoal_index = set(list(subgoal_index))
@@ -265,13 +264,20 @@ class AlfredDataset(Dataset):
         # data_cp = deepcopy(data)
         data_cp = data.copy()
 
+
         # Filter language instructions.
         data_cp['num'] = data_cp['num'].copy()
         if filter_instructions:
-            data_cp['num']['lang_instr'] = [
-                instr for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low'])
-                if a[0]['high_idx'] in subgoal_index
-            ]
+            high_indices = []
+            lang_instrs = []
+            for instr, a in safe_zip(data_cp['num']['lang_instr'], data_cp['num']['action_low']):
+                high_idx = a[0]['high_idx']
+                if high_idx not in subgoal_index:
+                    continue
+                lang_instrs.append(instr)
+                high_indices.append(high_idx)
+            data_cp['num']['lang_instr'] = lang_instrs
+            data_cp['num']['sub_instr_high_indices'] = high_indices
             if add_stop_in_subtrajectories:
                 # pull <<stop>> from the end of the original instruction
                 assert len(data['num']['lang_instr'][-1]) == 1
@@ -527,6 +533,10 @@ class BaseModule(nn.Module):
         '''
         is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
         if not is_serialized:
+            if 'sub_instr_high_indices' not in feat['num']:
+                # this value will be set by filter_subgoal_index if filter_instructions=True, i.e. if the instructions
+                # were filtered down to some particular high indices. otherwise, they're just the sequential ordering
+                feat['num']['sub_instr_high_indices'] = list(range(len(feat['num']['lang_instr'])))
             feat['num']['sub_instr_lengths'] = [len(desc) for desc in feat['num']['lang_instr']]
             feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
             if 'lang_instr_subgoal_mask' in feat['num']:
