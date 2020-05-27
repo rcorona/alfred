@@ -7,8 +7,11 @@ source activate alfred
 
 model_dir=$1
 
+date=`date -Iminutes`
+
 #for split in valid_seen valid_unseen
-for split in valid_seen
+#for split in valid_seen
+for split in valid_seen valid_unseen
 do
   python -u models/eval/eval_seq2seq.py \
     --model_path ${model_dir}/best_seen.pth \
@@ -21,5 +24,5 @@ do
     --subgoals all \
     --eval_type subgoals \
     --print_git \
-    | tee ${model_dir}/eval_subgoals_all_${split}_movable.out
+    | tee ${model_dir}/eval_subgoals_all_${split}_movable_${date}.out
 done
