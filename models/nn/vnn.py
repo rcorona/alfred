@@ -218,7 +218,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
                  teacher_forcing=False, n_modules=8, controller_type='attention',
-                 cloned_module_initialization=False):
+                 cloned_module_initialization=False, 
+                 init_model_path=None):
         super().__init__()
         demb = emb.weight.size(1)
         self.controller_type = controller_type
@@ -231,12 +232,31 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.dhid = dhid
         self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
         if cloned_module_initialization:
-            cell = nn.LSTMCell(dhid+dframe+demb, dhid)
-            self.cell = nn.ModuleList([clone_module(cell) for i in range(n_modules)])
-            attn = DotAttn()
-            self.attn = nn.ModuleList([clone_module(attn) for i in range(n_modules)])
-            h_tm1_fc = nn.Linear(dhid, dhid)
-            self.h_tm1_fc = nn.ModuleList([clone_module(h_tm1_fc) for i in range(n_modules)])
+ 
+            self.cell = nn.LSTMCell(dhid+dframe+demb, dhid)
+            self.attn = DotAttn()
+            self.h_tm1_fc = nn.Linear(dhid, dhid)
+
+            # Use pre-trained parameters if desired. 
+            if init_model_path: 
+            
+                # Load model parameters first. 
+                params = torch.load(init_model_path)['model']
+                
+                # Filter out only the paramters we need. 
+                params = {k: params[k] for k in params if 'dec.cell' in k or 'h_tm1_fc' in k}
+                params = {k.replace('dec.', ''): params[k] for k in params}
+                
+                # Load parameters. 
+                model_dict = self.state_dict()
+                model_dict.update(params)
+                self.load_state_dict(model_dict)
+
+            # Clone parameters across modules. 
+            self.cell = nn.ModuleList([clone_module(self.cell) for i in range(n_modules)])
+            self.attn = nn.ModuleList([clone_module(self.attn) for i in range(n_modules)])
+            self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
+    
         else:
             self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
             self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
