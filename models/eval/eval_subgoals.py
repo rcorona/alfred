@@ -140,7 +140,7 @@ class EvalSubgoals(Eval):
 
         if chunker_model is not None:
             assert is_hierarchical
-            assert model.args.controller_type == 'chunker'
+            assert model.args.hierarchical_controller == 'chunker'
             pred_modules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
             module_idxs_per_subgoal = [
                 model.submodule_names.index(module_name)
