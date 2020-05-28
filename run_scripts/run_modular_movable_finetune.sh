@@ -26,7 +26,7 @@ else
   name=${name}_actor_dropout:${actor_dropout}
 fi
 
-out_dir="exp/${name}"
+out_dir="exp_movable/${name}"
 
 mkdir $out_dir 2> /dev/null
 
@@ -34,7 +34,7 @@ python -u models/train/train_seq2seq.py \
   --data data/json_feat_2.1.0 \
   --model seq2seq_hierarchical \
   --dout $out_dir \
-  --splits data/splits/oct21.json \
+  --splits data/splits/movable.json \
   --batch 8 \
   --pm_aux_loss_wt 0.0 \
   --subgoal_aux_loss_wt 0.0 \
@@ -47,5 +47,5 @@ python -u models/train/train_seq2seq.py \
   --actor_dropout $actor_dropout \
   --hierarchical_controller chunker \
   --cloned_module_initialization \
-  --init_model_path $pretrain_path \
+  --init_model_path $pretrain_path \ 
   | tee ${out_dir}/stdout.log
