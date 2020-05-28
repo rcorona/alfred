@@ -292,11 +292,13 @@ class SubgoalChunker(BaseModule):
         for ex, feat in data:
             key = self.get_instance_key(ex)
             gold_tags = feat['chunk_tags'].cpu().tolist()
+            if len(gold_tags) == 1:
+                print("warning: len(gold_tags) == 1 for instance {}; this can happen with --subgoal_pairs for one of the ~20 missegmented instance in training, but otherwise there's likely an error".format(key))
+                continue
             pred_tags = preds[key]['chunk_tags']
 
             assert len(gold_tags) == feat['lang_instr_len']
-            if len(gold_tags) != len(pred_tags):
-                print("warning: len(gold_tags) != len(pred_tags): {} != {} on instance {}; this can happen for one of the ~20 missegmented instance in training, but otherwise there's likely an error".format(len(gold_tags), len(pred_tags), key))
+            assert len(gold_tags) == len(pred_tags)
             m['chunk_tag_acc'].append(compute_acc(gold_tags, pred_tags))
 
             flat_instr = feat['lang_instr']
