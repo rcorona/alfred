@@ -93,6 +93,9 @@ class EvalSubgoals(Eval):
 
     @classmethod
     def evaluate(cls, env, model, eval_idx, r_idx, resnet, chunker_model, traj_data, args, lock, successes, failures, results, subgoal_filtered_traj_data=None):
+        # avoid problems with is_serialized in successive (destructive) featurize calls on the single trajectory (only shows up when using both instruction_chunker  and hierarchical models)
+        # TODO: fix this
+        traj_data = deepcopy(traj_data)
         if args.model == "models.model.seq2seq_hierarchical":
             is_hierarchical = True
         elif args.model == "models.model.seq2seq_im_mask":
