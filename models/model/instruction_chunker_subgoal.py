@@ -295,7 +295,8 @@ class SubgoalChunker(BaseModule):
             pred_tags = preds[key]['chunk_tags']
 
             assert len(gold_tags) == feat['lang_instr_len']
-            assert len(gold_tags) == len(pred_tags)
+            if len(gold_tags) != len(pred_tags):
+                print("warning: len(gold_tags) != len(pred_tags): {} != {} on instance {}; this can happen for one of the ~20 missegmented instance in training, but otherwise there's likely an error".format(len(gold_tags), len(pred_tags), key))
             m['chunk_tag_acc'].append(compute_acc(gold_tags, pred_tags))
 
             flat_instr = feat['lang_instr']

@@ -237,9 +237,11 @@ class AlfredDataset(Dataset):
 
         # Make subgoal pairs and single subgoal compatible with each other.
         if type(subgoal_index) == int:
-            subgoal_index = set(subgoal_index)
+            subgoal_index = {subgoal_index}
         elif type(subgoal_index) == tuple: 
-            subgoal_index = set(list(subgoal_index))
+            subgoal_index_ = set(list(subgoal_index))
+            assert len(subgoal_index) == len(subgoal_index_)
+            subgoal_index = subgoal_index_
 
         # Use for counting dataset examples.
         #self.subgoal_count += len(valid_idx) - 1
@@ -478,7 +480,14 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
                 # Get last high-level index. 
                 last_idx = task['plan']['high_pddl'][-1]['high_idx']
 
-                # Get all contiguous pairs of subgoals. 
+                # valid_indices = list(sorted(AlfredDataset.extract_subgoal_indices(
+                #     task, keep_noop=True
+                # )))
+                # if valid_indices != list(range(0, last_idx+1)):
+                #     print("only subset of indices valid: {},{}: {}".format(task['task_id'],task['repeat_idx'],valid_indices))
+                # TODO: consider using `pairs = list(zip(valid_indices, valid_indices[1:]))`
+
+                # Get all contiguous pairs of subgoals.
                 pairs = [p for p in zip(range(0, last_idx), range(1, last_idx + 1))]
            
                 # Add to dataset. 
