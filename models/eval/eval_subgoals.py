@@ -141,11 +141,14 @@ class EvalSubgoals(Eval):
         if chunker_model is not None:
             assert is_hierarchical
             assert model.args.controller_type == 'chunker'
-            pred_submodules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
+            pred_modules = cls.predict_submodules_from_chunker(chunker_model, traj_data_chunker, args)
             module_idxs_per_subgoal = [
                 model.submodule_names.index(module_name)
-                for module_name in pred_submodules
+                for module_name in pred_modules
             ]
+            true_modules = [model.submodule_names[ix] for ix in feat['module_idxs_per_subgoal'].squeeze(0).tolist()]
+            print("gold modules: {}".format(' '.join(true_modules)))
+            print("pred modules: {}".format(' '.join(pred_modules)))
         else:
             module_idxs_per_subgoal = None
 
@@ -327,6 +330,14 @@ class EvalSubgoals(Eval):
             sg_failures = failures[subgoal_action]
             sg_failures.append(log_entry)
             failures[subgoal_action] = sg_failures
+        if is_hierarchical and chunker_model is not None:
+            log_entry['pred_modules'] = pred_modules
+            log_entry['true_modules'] = true_modules
+            log_entry['action_high_f1'] = compute_f1(true_modules, pred_modules)
+            log_entry['action_high_em'] = compute_exact(true_modules, pred_modules)
+            log_entry['action_high_gold_length'] = len(true_modules)
+            log_entry['action_high_pred_length'] = len(pred_modules)
+            log_entry['action_high_edit_distance'] = compute_edit_distance(true_modules, pred_modules)
 
         # save results
         print("-------------")

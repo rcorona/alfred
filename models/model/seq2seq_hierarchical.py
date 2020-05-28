@@ -413,7 +413,11 @@ class Module(Base):
 
             # Either use max over attention or oracle subgoal selection. 
             if module_idxs_per_subgoal is not None:
-                max_subgoal = module_idxs_per_subgoal[self.r_state['subgoal_counter']]
+                if self.r_state['subgoal_counter'] < len(module_idxs_per_subgoal):
+                    max_subgoal = module_idxs_per_subgoal[self.r_state['subgoal_counter']]
+                else:
+                    max_subgoal = module_idxs_per_subgoal[-1]
+                    print("warning: advanced past the end of module_idxs_per_subgoal; using last subgoal {}".format(max_subgoal))
             else:
                 # Only pay attention to a single module.
                 max_subgoal = controller_attn_logits.max(2)[1].squeeze()
