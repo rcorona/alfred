@@ -35,7 +35,7 @@ python -u models/train/train_seq2seq.py \
   --model seq2seq_hierarchical \
   --dout $out_dir \
   --splits data/splits/movable.json \
-  --batch 8 \
+  --batch 6 \
   --pm_aux_loss_wt 0.0 \
   --subgoal_aux_loss_wt 0.0 \
   --zero_goal \
@@ -47,5 +47,5 @@ python -u models/train/train_seq2seq.py \
   --actor_dropout $actor_dropout \
   --hierarchical_controller chunker \
   --cloned_module_initialization \
-  --init_model_path $pretrain_path \ 
+  --init_model_path $pretrain_path \
   | tee ${out_dir}/stdout.log

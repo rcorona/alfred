@@ -241,7 +241,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             if init_model_path: 
             
                 # Load model parameters first. 
-                params = torch.load(init_model_path)['model']
+                params = torch.load(init_model_path, map_location='cpu')['model']
                 
                 # Filter out only the paramters we need. 
                 params = {k: params[k] for k in params if 'dec.cell' in k or 'h_tm1_fc' in k}
