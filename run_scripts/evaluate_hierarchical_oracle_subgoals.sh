@@ -9,9 +9,11 @@ model_dir=$1
 
 subgoals=$2
 
-#for split in valid_seen valid_unseen
+date=`date -Iminutes`
+
+for split in valid_seen valid_unseen
 #for split in valid_seen
-for split in valid_unseen valid_seen
+#for split in valid_unseen valid_seen
 do
   python -u models/eval/eval_seq2seq.py \
     --model_path ${model_dir}/best_seen.pth \
@@ -24,5 +26,5 @@ do
     --eval_type subgoals \
     --oracle \
     --print_git \
-    | tee ${model_dir}/eval_oracle_subgoals_${subgoals}_${split}.out
+    | tee ${model_dir}/eval_oracle_subgoals_${subgoals}_${split}_${date}.out
 done

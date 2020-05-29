@@ -541,6 +541,9 @@ class BaseModule(nn.Module):
         append segmented instr language and low-level actions into single sequences
         '''
         is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
+        print("is_serialized: {}".format(is_serialized))
+        if is_serialized:
+            print(feat['num']['lang_instr'][0])
         if not is_serialized:
             if 'sub_instr_high_indices' not in feat['num']:
                 # this value will be set by filter_subgoal_index if filter_instructions=True, i.e. if the instructions
@@ -588,7 +591,10 @@ class BaseModule(nn.Module):
         load pth model from disk
         '''
         save = torch.load(fsave)
-        model = cls(save['args'], save['vocab'])
+        args = save['args']
+        # some models first load parameters from a separate path, if init_model_path is specified, so set it to None
+        args.init_model_path = None
+        model = cls(args, save['vocab'])
         model.load_state_dict(save['model'])
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         optimizer.load_state_dict(save['optim'])
