@@ -231,36 +231,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.pframe = pframe
         self.dhid = dhid
         self.vis_encoder = ResnetVisualEncoder(dframe=dframe)
-        if cloned_module_initialization:
- 
-            self.cell = nn.LSTMCell(dhid+dframe+demb, dhid)
-            self.attn = DotAttn()
-            self.h_tm1_fc = nn.Linear(dhid, dhid)
 
-            # Use pre-trained parameters if desired. 
-            if init_model_path: 
-            
-                # Load model parameters first. 
-                params = torch.load(init_model_path, map_location='cpu')['model']
-                
-                # Filter out only the paramters we need. 
-                params = {k: params[k] for k in params if 'dec.cell' in k or 'h_tm1_fc' in k}
-                params = {k.replace('dec.', ''): params[k] for k in params}
-                
-                # Load parameters. 
-                model_dict = self.state_dict()
-                model_dict.update(params)
-                self.load_state_dict(model_dict)
-
-            # Clone parameters across modules. 
-            self.cell = nn.ModuleList([clone_module(self.cell) for i in range(n_modules)])
-            self.attn = nn.ModuleList([clone_module(self.attn) for i in range(n_modules)])
-            self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
-    
-        else:
-            self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
-            self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
-            self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 #         if self.use_fc_nodes:
 #             self.fc_nodes = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
         # High level controller.
@@ -291,6 +262,40 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.teacher_forcing = teacher_forcing
 
         nn.init.uniform_(self.go, -0.1, 0.1)
+
+        if cloned_module_initialization:
+ 
+            self.cell = nn.LSTMCell(dhid+dframe+demb, dhid)
+            self.attn = DotAttn()
+            self.h_tm1_fc = nn.Linear(dhid, dhid)
+
+            # Use pre-trained parameters if desired. 
+            if init_model_path: 
+            
+                # Load model parameters first. 
+                params = torch.load(init_model_path, map_location='cpu')['model']
+
+                # Filter out only the paramters we need. 
+                params = {k.replace('dec.', ''): params[k] for k in params}
+                params = {k.replace('mask_', 'mask_dec.'): params[k] for k in params}
+                params = {k: params[k] for k in params if not 'enc.' in k}
+                params = {k: params[k] for k in params if not 'emb_' in k}
+                params = {k: params[k] for k in params if not 'enc_att' in k}
+
+                # Load parameters. 
+                model_dict = self.state_dict()
+                model_dict.update(params)
+                self.load_state_dict(model_dict)
+
+            # Clone parameters across modules. 
+            self.cell = nn.ModuleList([clone_module(self.cell) for i in range(n_modules)])
+            self.attn = nn.ModuleList([clone_module(self.attn) for i in range(n_modules)])
+            self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
+    
+        else:
+            self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
+            self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
+            self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
     def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
         # transition_mask and next_transition_mask are not

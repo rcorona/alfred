@@ -69,6 +69,32 @@ class Module(Base):
         cloned_module_initialization = vars(args).get("cloned_module_initialization", False)
         init_model_path = vars(args).get("init_model_path", None)
 
+        # Load pretrained parameters if desired. 
+        if init_model_path: 
+        
+            # Load model parameters first. 
+            params = torch.load(init_model_path, map_location='cpu')['model']
+
+            # Filter out only the paramters we need. 
+            loading_params = {k: params[k] for k in params if 'emb_' in k or 'enc.' in k}
+           
+            for i in range(len(self.enc_att)): 
+                for k in params.keys(): 
+                    if 'enc_att' in k: 
+
+                        # Hack for getting the number inside the key. 
+                        new_k = k.split('.')
+                        new_k = [new_k[0]] + [str(i)] + new_k[1:]
+                        new_k = '.'.join(new_k)
+
+                        # Clone encoder attention. 
+                        loading_params[new_k] = params[k]
+
+            # Load parameters. 
+            model_dict = self.state_dict()
+            model_dict.update(loading_params)
+            self.load_state_dict(model_dict)
+
         # frame mask decoder
         if self.subgoal_monitoring:
             decoder = vnn.ConvFrameMaskDecoderProgressMonitor
