@@ -17,5 +17,6 @@ do
     --model models.model.seq2seq_im_mask \
     --gpu \
     --num_threads 3 \
-    | tee ${model_dir}/eval_${split}.out
+    --print_git \
+    | tee ${model_dir}/eval_${split}_generalization.out
 done
