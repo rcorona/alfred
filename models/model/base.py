@@ -541,9 +541,9 @@ class BaseModule(nn.Module):
         append segmented instr language and low-level actions into single sequences
         '''
         is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
-        print("is_serialized: {}".format(is_serialized))
-        if is_serialized:
-            print(feat['num']['lang_instr'][0])
+        # print("is_serialized: {}".format(is_serialized))
+        # if is_serialized:
+        #     print(feat['num']['lang_instr'][0])
         if not is_serialized:
             if 'sub_instr_high_indices' not in feat['num']:
                 # this value will be set by filter_subgoal_index if filter_instructions=True, i.e. if the instructions

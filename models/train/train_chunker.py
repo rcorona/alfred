@@ -20,7 +20,7 @@ from models.utils.helper_utils import optimizer_to, print_git_info
 from models.train.train_seq2seq import  add_data_args
 
 from models.model.instruction_chunker import Chunker
-from models.model.instruction_chunker_subgoal import SubgoalChunker
+from models.model.instruction_chunker_subgoal import SubgoalChunker, SubgoalChunkerSelfTransitions
 
 def make_parser():
     # parser
@@ -31,7 +31,9 @@ def make_parser():
     # other settings
     parser.add_argument('--seed', help='random seed', default=123, type=int)
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
-    parser.add_argument('--model', help='model to use', default='instruction_chunker', choices=['instruction_chunker', 'instruction_chunker_subgoal'])
+    parser.add_argument('--model', help='model to use', default='instruction_chunker', choices=[
+        'instruction_chunker', 'instruction_chunker_subgoal', 'instruction_chunker_subgoal_self_transitions'
+    ])
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/chunker')
     parser.add_argument('--resume', help='load a checkpoint')
@@ -90,6 +92,7 @@ def main():
     Class = {
         'instruction_chunker': Chunker,
         'instruction_chunker_subgoal': SubgoalChunker,
+        'instruction_chunker_subgoal_self_transitions': SubgoalChunkerSelfTransitions,
     }[args.model]
 
     # load model
