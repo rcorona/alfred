@@ -32,6 +32,11 @@ class AlfredBaselineDataset(Dataset):
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
 
+    def get_task_root(self, ex):
+        '''
+        returns the folder path of a trajectory
+        '''
+        return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
 
     def featurize(self, ex):
@@ -39,12 +44,23 @@ class AlfredBaselineDataset(Dataset):
         tensorize and pad batch input
         '''
 
-        high_level = torch.tensor(ex["high_level"]).to(self.device)
-        low_level_context = [torch.tensor(ll).to(self.device) for ll in ex["low_level_context"]]
+        root = self.get_task_root(ex)
+        im = torch.load(os.path.join(root, "feat_conv.pt")) # sizes of images are 512 x 7 x 7
+        keep = [None] * len(ex['plan']['low_actions'])
+        for idx, img_info in enumerate(ex['images']): # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+            if keep[img_info['low_idx']] is None:
+                keep[img_info['low_idx']] = (im[idx], img_info['high_idx'])
+        keep.append((keep[-1][0], keep[-1][1]+1))  # stop frame
+
+        high_level = torch.stack([keep[j][0] for j in range(len(keep))], dim=0).type(torch.long) # seqlen x 512 x 7 x 7
+        low_level_context = [torch.stack([keep[j][0] for j in range(len(keep)) if keep[j][1] == i], dim=0).type(torch.long) for i in range(len(ex['ann']['instr']))] # seqlen x 512 x 7 x 7
+
+        high_level = high_level.to(self.device)
+        low_level_context = [ll.to(self.device) for ll in low_level_context]
         target_idx = random.randrange(len(low_level_context))
         low_level_target = low_level_context[target_idx]
         del low_level_context[target_idx]
-        padded_context = torch.cat([high_level] + [torch.tensor(self.seg).unsqueeze(0).to(self.device)] + low_level_context, dim=0)
+        padded_context = torch.cat([high_level] + [torch.tensor(self.seg, dtype = torch.long).repeat(1, 512, 7, 7).to(self.device)] + low_level_context, dim=0)
 
         return (padded_context, low_level_target)
 
@@ -53,8 +69,12 @@ class AlfredBaselineDataset(Dataset):
         # Load task from dataset.
         task = self.data[idx]
 
+        json_path = os.path.join(self.args.data, task['task'], '%s' % self.args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        with open(json_path) as f:
+            data = json.load(f)
+
         # Create dict of features from dict.
-        feat = self.featurize(task)
+        feat = self.featurize(data)
 
         return feat
 
@@ -96,7 +116,7 @@ class Module(Base):
         self.vocab = vocab
 
         # encoder and self-attention
-        self.embed = nn.Embedding(len(self.vocab['word']), args.demb)
+        self.embed = nn.Embedding(512, args.demb)
         self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
         self.to(self.device)
 
@@ -131,18 +151,20 @@ class Module(Base):
     def run_train(self, splits, optimizer, args=None):
 
         args = args or self.args
-        self.writer = SummaryWriter('runs/baseline')
+        self.writer = SummaryWriter('runs/img_baseline')
         fsave = os.path.join(args.dout, 'best.pth')
 
         # Loading Data
-        splits = self.load_data_into_ram()
-        valid_idx = np.arange(start=0, stop=len(splits), step=10)
-        eval_idx = np.arange(start=1, stop=len(splits), step=10)
-        train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
+        # splits = self.load_data_into_ram()
+        # valid_idx = np.arange(start=0, stop=len(splits), step=10)
+        # eval_idx = np.arange(start=1, stop=len(splits), step=10)
+        # train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
 
-        valid_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in valid_idx])
-        eval_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in eval_idx])
-        train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
+        train_data = splits['train']
+        valid_data = splits['valid_seen'] + splits['valid_unseen']
+
+        valid_dataset = AlfredBaselineDataset(self.args, valid_data)
+        train_dataset = AlfredBaselineDataset(self.args, train_data)
 
         valid_loader = DataLoader(valid_dataset, batch_size=128, shuffle=True, collate_fn=valid_dataset.collate())
         train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=train_dataset.collate())

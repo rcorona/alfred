@@ -73,52 +73,52 @@ class Dataset(object):
 
 
 
-        # for k, d in splits.items():
-        #     print('Preprocessing {}'.format(k))
-        #
-        #     # debugging:
-        #     if self.args.fast_epoch:
-        #         d = d[:16]
-        #
-        #     for task in progressbar.progressbar(d):
-        #         # load json file
-        #         json_path = os.path.join(self.args.data, k, task['task'], 'traj_data.json')
-        #         with open(json_path) as f:
-        #             ex = json.load(f)
-        #
-        #         # copy trajectory
-        #         r_idx = task['repeat_idx'] # repeat_idx is the index of the annotation for each trajectory
-        #         traj = ex.copy()
-        #
-        #
-        #         # root & split
-        #         traj['root'] = os.path.join(self.args.data, task['task'])
-        #         traj['split'] = k
-        #
-        #         # numericalize language
-        #         self.process_language(ex, traj, complete, r_idx)
-        #
-        #         # numericalize actions for train/valid splits
-        #         if 'test' not in k: # expert actions are not available for the test set
-        #             self.process_actions(ex, traj)
-        #
-        #         # check if preprocessing storage folder exists
-        #         preprocessed_folder = os.path.join(self.args.data, task['task'], self.args.pp_folder)
-        #         if not os.path.isdir(preprocessed_folder):
-        #             os.makedirs(preprocessed_folder)
-        #
-        #         # save preprocessed json
-        #         preprocessed_json_path = os.path.join(preprocessed_folder, "ann_%d.json" % r_idx)
-        #         with open(preprocessed_json_path, 'w') as f:
-        #             json.dump(traj, f, sort_keys=True, indent=4)
-        #
-        # # save vocab in dout path
-        # vocab_dout_path = os.path.join(self.args.dout, '%s.vocab' % self.args.pp_folder)
-        # torch.save(self.vocab, vocab_dout_path)
-        #
-        # # save vocab in data path
-        # vocab_data_path = os.path.join(self.args.data, '%s.vocab' % self.args.pp_folder)
-        # torch.save(self.vocab, vocab_data_path)
+        for k, d in splits.items():
+            print('Preprocessing {}'.format(k))
+
+            # debugging:
+            if self.args.fast_epoch:
+                d = d[:16]
+
+            for task in progressbar.progressbar(d):
+                # load json file
+                json_path = os.path.join(self.args.data, k, task['task'], 'traj_data.json')
+                with open(json_path) as f:
+                    ex = json.load(f)
+
+                # copy trajectory
+                r_idx = task['repeat_idx'] # repeat_idx is the index of the annotation for each trajectory
+                traj = ex.copy()
+
+
+                # root & split
+                traj['root'] = os.path.join(self.args.data, task['task'])
+                traj['split'] = k
+
+                # numericalize language
+                self.process_language(ex, traj, complete, r_idx)
+
+                # numericalize actions for train/valid splits
+                if 'test' not in k: # expert actions are not available for the test set
+                    self.process_actions(ex, traj)
+
+                # check if preprocessing storage folder exists
+                preprocessed_folder = os.path.join(self.args.data, task['task'], self.args.pp_folder)
+                if not os.path.isdir(preprocessed_folder):
+                    os.makedirs(preprocessed_folder)
+
+                # save preprocessed json
+                preprocessed_json_path = os.path.join(preprocessed_folder, "ann_%d.json" % r_idx)
+                with open(preprocessed_json_path, 'w') as f:
+                    json.dump(traj, f, sort_keys=True, indent=4)
+
+        # save vocab in dout path
+        vocab_dout_path = os.path.join(self.args.dout, '%s.vocab' % self.args.pp_folder)
+        torch.save(self.vocab, vocab_dout_path)
+
+        # save vocab in data path
+        vocab_data_path = os.path.join(self.args.data, '%s.vocab' % self.args.pp_folder)
+        torch.save(self.vocab, vocab_data_path)
 
 
     def process_language(self, ex, traj, complete, r_idx):

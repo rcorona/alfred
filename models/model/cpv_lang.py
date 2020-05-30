@@ -171,7 +171,7 @@ class Module(Base):
     def run_train(self, splits, optimizer, args=None):
 
         args = args or self.args
-        self.writer = SummaryWriter('runs/actual')
+        self.writer = SummaryWriter('runs/lang_cpv')
         fsave = os.path.join(args.dout, 'best.pth')
 
         # Loading Data
