@@ -219,11 +219,13 @@ class ConvFrameMaskDecoderModular(nn.Module):
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
                  teacher_forcing=False, n_modules=8, controller_type='attention',
                  cloned_module_initialization=False, 
-                 init_model_path=None):
+                 init_model_path=None,
+                 modularize_actor_mask=False):
         super().__init__()
         demb = emb.weight.size(1)
         self.controller_type = controller_type
         self.cloned_module_initialization = cloned_module_initialization
+        self.modularize_actor_mask=modularize_actor_mask
 
         self.n_modules = n_modules
 
@@ -291,13 +293,122 @@ class ConvFrameMaskDecoderModular(nn.Module):
             self.cell = nn.ModuleList([clone_module(self.cell) for i in range(n_modules)])
             self.attn = nn.ModuleList([clone_module(self.attn) for i in range(n_modules)])
             self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
-    
+
+            if modularize_actor_mask: 
+                self.actor = nn.ModuleList([clone_module(self.actor) for i in range(n_modules)])
+                self.mask_dec = nn.ModuleList([clone_module(self.mask_dec) for i in range(n_modules)])
+
         else:
             self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
             self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
             self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
     def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
+        # transition_mask and next_transition_mask are not
+        # previous decoder hidden state for modules.
+
+        if not self.modularize_actor_mask: 
+            return self.single_actor_mask_step(enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask)
+        else: 
+            return self.multiple_actor_mask_step(enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask)
+
+    def multiple_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
+        # transition_mask and next_transition_mask are not
+        # previous decoder hidden state for modules.
+        h_tm1 = state_tm1[0]
+
+        batch_sz = frame.size(0)
+
+        # encode vision and lang feat
+        vis_feat_t = self.vis_encoder(frame)
+        lang_feat_t = enc # language is encoded once at the start
+
+        lang_attn_t = []
+        h_t = []
+        c_t = []
+        action_t = []
+        mask_t = []
+
+        # Iterate over each module. 
+        for i in range  (self.n_modules): 
+
+            # attend over language
+            weighted_lang_ti, lang_attn_ti = self.attn[i](self.attn_dropout(lang_feat_t), self.h_tm1_fc[i](h_tm1))
+            lang_attn_t.append(lang_attn_ti)
+
+            # concat visual feats, weight lang, and previous action embedding
+            inp_ti = torch.cat([vis_feat_t, weighted_lang_ti, e_t], dim=1)
+            inp_ti = self.input_dropout(inp_ti)
+
+            # update hidden state
+            state_t = self.cell[i](inp_ti, (h_tm1, state_tm1[1]))
+            state_t = [self.hstate_dropout(x) for x in state_t]
+            # batch x dhid
+            h_t.append(state_t[0])
+            c_t.append(state_t[1])
+
+            # decode action and mask
+            cont_t = torch.cat([state_t[0], inp_ti], dim=-1)    
+            action_emb_t = self.actor[i](self.actor_dropout(cont_t))
+            action_t.append(action_emb_t.mm(self.emb.weight.t()))
+            mask_t.append(self.mask_dec[i](cont_t))
+
+        # Attend over each modules output.
+        h_t_in = self.attn_dropout(torch.cat([h.unsqueeze(1) for h in h_t], dim=1)) # batch x n_modules x dhid
+        c_t = torch.cat([c.unsqueeze(1) for c in c_t], dim=1)
+        action_t = torch.cat([a.unsqueeze(1) for a in action_t], dim=1)
+        mask_t = torch.cat([m.unsqueeze(1) for m in mask_t], dim=1)
+        lang_attn_t = torch.cat(lang_attn_t, dim=-1)
+
+        # Add stop embedding. 
+
+        h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
+
+        # Attend over submodules hidden states. 
+        # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism.
+        if self.controller_type == 'attention':
+            _, module_scores = self.controller_attn(h_t_in, self.controller_h_tm1_fc(controller_state_tm1[0]))
+            module_attn_logits = self.controller_attn.raw_score
+        else:
+            assert controller_mask is not None, "when not using an attention-based controller, must pass controller_mask to step()"
+
+        # If no supervised/forced attention is provided, then used inferred values.
+        if controller_mask is None:
+            module_attn = module_scores
+
+            # Only pay attention to a single module.
+            max_subgoal = module_attn.max(1)[1].squeeze()
+
+            module_attn = torch.zeros_like(module_attn)
+            module_attn[:,max_subgoal,:] = 1.0
+
+        # Otherwise use ground truth attention.
+        else:
+            module_attn = controller_mask.unsqueeze(-1).float()
+
+        h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
+        c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
+        lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+        action_t = module_attn[:,:-1,:].expand_as(action_t).mul(action_t).sum(1)
+        mask_t = module_attn[:,:-1,:].unsqueeze(-1).unsqueeze(-1).expand_as(mask_t).mul(mask_t).sum(1)
+
+        # update controller hidden state
+        if self.controller_type == 'attention':
+            controller_state_t = self.controller(cont_t, controller_state_tm1)
+            controller_state_t = [self.hstate_dropout(x) for x in controller_state_t]
+            module_attn_logits_ret = module_attn_logits.view(batch_sz,1,9)
+        else:
+            controller_state_t = None
+            module_attn_logits_ret = None
+
+        # Package weighted state for output. 
+        state_t = (h_t_in, c_t)
+
+        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
+
+
+
+    def single_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
         h_tm1 = state_tm1[0]
