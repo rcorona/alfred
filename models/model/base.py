@@ -938,25 +938,26 @@ class BaseModule(nn.Module):
         total_loss = list()
         dev_iter = iter
 
-        with tqdm.tqdm(dev_loader, unit='batch', total=len(dev_loader), ncols=80) as batch_iterator:
-            for i_batch, (batch, feat) in enumerate(batch_iterator):
+        with torch.no_grad():
+            with tqdm.tqdm(dev_loader, unit='batch', total=len(dev_loader), ncols=80) as batch_iterator:
+                for i_batch, (batch, feat) in enumerate(batch_iterator):
 
-                out = self.forward(feat)
-                preds = self.extract_preds(out, batch, feat)
-                if 'action_low_mask' in preds:
-                    # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
-                    del preds['action_low_mask']
-                p_dev.update(preds)
-                #pdb.set_trace()
-                loss = self.compute_loss(out, batch, feat)
-                for k, v in loss.items():
-                    ln = 'loss_' + k
-                    m_dev[ln].append(v.item())
-                    self.summary_writer.add_scalar("%s/%s" % (name, ln), v.item(), dev_iter)
-                sum_loss = sum(loss.values())
-                self.summary_writer.add_scalar("%s/loss" % (name), sum_loss, dev_iter)
-                total_loss.append(float(sum_loss.detach().cpu()))
-                dev_iter += len(batch)
+                    out = self.forward(feat)
+                    preds = self.extract_preds(out, batch, feat)
+                    if 'action_low_mask' in preds:
+                        # these are expensive to store, and we only currently use them in eval when we're interacting with the simulator
+                        del preds['action_low_mask']
+                    p_dev.update(preds)
+                    #pdb.set_trace()
+                    loss = self.compute_loss(out, batch, feat)
+                    for k, v in loss.items():
+                        ln = 'loss_' + k
+                        m_dev[ln].append(v.item())
+                        self.summary_writer.add_scalar("%s/%s" % (name, ln), v.item(), dev_iter)
+                    sum_loss = sum(loss.values())
+                    self.summary_writer.add_scalar("%s/loss" % (name), sum_loss, dev_iter)
+                    total_loss.append(float(sum_loss.detach().cpu()))
+                    dev_iter += len(batch)
 
         m_dev = {k: sum(v) / len(v) for k, v in m_dev.items()}
         total_loss = sum(total_loss) / len(total_loss)

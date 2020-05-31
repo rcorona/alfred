@@ -35,7 +35,7 @@ python -u models/train/train_seq2seq.py \
   --model seq2seq_hierarchical \
   --dout $out_dir \
   --splits data/splits/oct21.json \
-  --batch 8 \
+  --batch 6 \
   --pm_aux_loss_wt 0.0 \
   --subgoal_aux_loss_wt 0.0 \
   --zero_goal \

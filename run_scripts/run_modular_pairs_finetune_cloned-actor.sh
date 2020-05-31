@@ -10,7 +10,7 @@ then
   dhid=512
 fi
 
-name=modular_finetune_cloned-actor_dhid:${dhid}
+name=modular_finetune_cloned-actor_dhid:${dhid}_2
 
 if [[ -z $hstate_dropout ]]
 then
@@ -35,7 +35,7 @@ python -u models/train/train_seq2seq.py \
   --model seq2seq_hierarchical \
   --dout $out_dir \
   --splits data/splits/oct21.json \
-  --batch 8 \
+  --batch 6 \
   --pm_aux_loss_wt 0.0 \
   --subgoal_aux_loss_wt 0.0 \
   --zero_goal \
