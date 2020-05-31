@@ -367,3 +367,46 @@ class SubgoalChunkerSelfTransitions(SubgoalChunker):
         edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
 
         return edge_potentials
+
+class SubgoalChunkerNoTransitions(SubgoalChunker):
+    def add_tag_params(self):
+        pass
+
+    def make_potentials(self, tag_unaries, lengths):
+        # following https://github.com/harvardnlp/pytorch-struct/blob/b6816a4d436136c6711fe2617995b556d5d4d300/torch_struct/linearchain.py#L137
+        # tag_scores: batch x N x c
+        # lengths: batch
+        batch, N, C = tag_unaries.size()
+        assert C == len(self.LABEL_VOCAB)
+
+        # to, from
+        transition_mat = torch.full((C, C), BIG_NEG, device=tag_unaries.device)
+        # can transition from anything to PAD
+        transition_mat[self.PAD_ID,:] = 0
+
+        # can transition from B to I or I to I of the same subgoal
+        for ix, (b, i) in enumerate(zip(self.BEGIN_INDICES, self.INSIDE_INDICES)):
+            transition_mat[i, b] = 0
+            transition_mat[i, i] = 0
+
+        # scores from transitioning from B to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.BEGIN_INDICES)] = 0
+        # scores from transitioning from I to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.INSIDE_INDICES)] = 0
+
+        # batch x N x C(to) x C(from)
+        edge_potentials = torch.zeros((batch, N-1, C, C), device=tag_unaries.device)
+        for ix, t in enumerate(lengths):
+            # padding iff < the sequence length
+            edge_potentials[ix,:t-1,self.PAD_ID,:] = BIG_NEG
+            edge_potentials[ix,t-1:,:,:] = BIG_NEG
+            edge_potentials[ix,t-1:,self.PAD_ID,:] = 0
+
+        # edge_potentials[:,0,:,self.BEGIN_INDICES] += self.tag_init.view(1,1,self.tag_init.size(-1))
+        edge_potentials[:,0,:,self.INSIDE_INDICES] = BIG_NEG
+        edge_potentials[:,:,:,:] += transition_mat.view(1,1,C,C)
+
+        edge_potentials[:,:,:,:] += tag_unaries.view(batch, N, C, 1)[:, 1:]
+        edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
+
+        return edge_potentials
