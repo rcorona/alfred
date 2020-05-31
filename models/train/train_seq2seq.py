@@ -31,6 +31,7 @@ def add_data_args(parser):
 
     # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
+    parser.add_argument('--moderate_epoch', help='500 exs in each split during debugging', action='store_true')
     parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
 
 def make_parser():
@@ -85,6 +86,7 @@ def make_parser():
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
     parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
+    parser.add_argument('--subgoal_pairs_validate_full', help='but use full datasets for validation', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")

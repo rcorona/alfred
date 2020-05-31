@@ -386,11 +386,23 @@ class ConvFrameMaskDecoderModular(nn.Module):
         else:
             module_attn = controller_mask.unsqueeze(-1).float()
 
-        h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
-        c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
-        lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
-        action_t = module_attn[:,:-1,:].expand_as(action_t).mul(action_t).sum(1)
-        mask_t = module_attn[:,:-1,:].unsqueeze(-1).unsqueeze(-1).expand_as(mask_t).mul(mask_t).sum(1)
+        # batch_sz
+        module_chosen = module_attn.argmax(1).flatten()
+        module_chosen_no_noop = module_attn[:,:-1,:].argmax(1).flatten()
+        index_dims = torch.arange(batch_sz)
+
+        # h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
+        # c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
+        # lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+        # action_t = module_attn[:,:-1,:].expand_as(action_t).mul(action_t).sum(1)
+        # mask_t = module_attn[:,:-1,:].unsqueeze(-1).unsqueeze(-1).expand_as(mask_t).mul(mask_t).sum(1)
+
+        h_t_in = h_t_in[index_dims,module_chosen]
+        c_t = c_t[index_dims, module_chosen_no_noop]
+        # lang_attn_t is batch_sz x t x 8
+        lang_attn_t = lang_attn_t[index_dims, :, module_chosen_no_noop]
+        action_t = action_t[index_dims, module_chosen_no_noop]
+        mask_t = mask_t[index_dims, module_chosen_no_noop]
 
         # update controller hidden state
         if self.controller_type == 'attention':
