@@ -694,6 +694,11 @@ class BaseModule(nn.Module):
             valid_seen = valid_seen[:small_valid_size]
             valid_unseen = valid_unseen[:small_valid_size]
 
+        if self.args.moderate_epoch:
+            train = train[:500]
+            valid_seen = valid_seen[:500]
+            valid_unseen = valid_unseen[:500]
+
         # debugging: use to check if training loop works without waiting for full epoch
         if self.args.fast_epoch:
             train = train[:16]
@@ -711,6 +716,8 @@ class BaseModule(nn.Module):
         random_state = random.Random(1)
         random_state.shuffle(train_subset)
         train_subset = train_subset[::20]
+
+        full_dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
 
         # this isn't implemented for instruction_chunker
         if vars(args).get('train_on_subtrajectories', False) or vars(args).get('train_on_subtrajectories_full_instructions', False):
@@ -730,12 +737,16 @@ class BaseModule(nn.Module):
                 subgoal_pairs = subgoal_pairs
             )
         else:
-            dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
+            dataset_constructor = full_dataset_constructor
 
         # Put dataset splits into wrapper class for parallelizing data-loading.
         train = dataset_constructor(train)
-        valid_seen = dataset_constructor(valid_seen)
-        valid_unseen = dataset_constructor(valid_unseen)
+        if args.subgoal_pairs_validate_full:
+            valid_seen = full_dataset_constructor(valid_seen)
+            valid_unseen = full_dataset_constructor(valid_unseen)
+        else:
+            valid_seen = dataset_constructor(valid_seen)
+            valid_unseen = dataset_constructor(valid_unseen)
         train_subset = dataset_constructor(train_subset)
 
         # setting this to True didn't seem to give a speedup
@@ -787,6 +798,7 @@ class BaseModule(nn.Module):
             self.adjust_lr(optimizer, args.lr, epoch, decay_epoch=args.decay_epoch)
             p_train = {}
             total_train_loss = list()
+            total_train_loss_sum = 0
 
             with tqdm.tqdm(train_loader, unit='batch', total=len(train_loader), ncols=80) as batch_iterator:
                 for i_batch, (batch, feat) in enumerate(batch_iterator):
@@ -820,7 +832,11 @@ class BaseModule(nn.Module):
                     self.summary_writer.add_scalar('train/loss', sum_loss, train_iter)
                     sum_loss = sum_loss.detach().cpu()
                     total_train_loss.append(float(sum_loss))
+                    total_train_loss_sum += float(sum_loss)
                     train_iter += self.args.batch
+
+                    if i_batch > 0:
+                        batch_iterator.set_postfix({"avg_train_loss": total_train_loss_sum / i_batch})
 
                     # e_time = time.time()
                     # print('Batch time in seconds: {}'.format(e_time - s_time))

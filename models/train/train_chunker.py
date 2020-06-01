@@ -21,6 +21,7 @@ from models.train.train_seq2seq import  add_data_args
 
 from models.model.instruction_chunker import Chunker
 from models.model.instruction_chunker_subgoal import SubgoalChunker, SubgoalChunkerSelfTransitions, SubgoalChunkerNoTransitions
+from models.model.instruction_chunker_subgoal_semimarkov import SubgoalChunkerSemiMarkov
 
 def make_parser():
     # parser
@@ -35,7 +36,9 @@ def make_parser():
         'instruction_chunker', 'instruction_chunker_subgoal',
         'instruction_chunker_subgoal_self_transitions',
         'instruction_chunker_subgoal_no_transitions',
+        'instruction_chunker_subgoal_semimarkov',
     ])
+    parser.add_argument('--instruction_chunker_memm', action='store_true', help='use a maximum entropy Markov model (rather than a CRF)')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/chunker')
     parser.add_argument('--resume', help='load a checkpoint')
@@ -48,6 +51,7 @@ def make_parser():
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
     parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
+    parser.add_argument('--subgoal_pairs_validate_full', help='but use full datasets for validation', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")
@@ -96,6 +100,7 @@ def main():
         'instruction_chunker_subgoal': SubgoalChunker,
         'instruction_chunker_subgoal_self_transitions': SubgoalChunkerSelfTransitions,
         'instruction_chunker_subgoal_no_transitions': SubgoalChunkerNoTransitions,
+        'instruction_chunker_subgoal_semimarkov': SubgoalChunkerSemiMarkov,
     }[args.model]
 
     # load model

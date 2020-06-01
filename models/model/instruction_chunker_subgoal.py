@@ -74,6 +74,9 @@ class SubgoalChunker(BaseModule):
         self.tag_init = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
         self.tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
 
+    def add_pred_layer(self):
+        self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.LABEL_VOCAB))
+
     def __init__(self, args, vocab):
         super().__init__(args)
         self.vocab = vocab
@@ -88,7 +91,7 @@ class SubgoalChunker(BaseModule):
 
         self.bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
 
-        self.chunk_pred_layer = nn.Linear(args.dhid*2, len(self.LABEL_VOCAB))
+        self.add_pred_layer()
 
         self.add_tag_params()
 
@@ -118,18 +121,33 @@ class SubgoalChunker(BaseModule):
 
         # batch x N x C(to) x C(from)
         edge_potentials = torch.zeros((batch, N-1, C, C), device=tag_unaries.device)
-        for ix, t in enumerate(lengths):
-            # padding iff < the sequence length
-            edge_potentials[ix,:t-1,self.PAD_ID,:] = BIG_NEG
-            edge_potentials[ix,t-1:,:,:] = BIG_NEG
-            edge_potentials[ix,t-1:,self.PAD_ID,:] = 0
 
+        def constrain(edge_potentials):
+            for ix, t in enumerate(lengths):
+                # padding iff < the sequence length
+                edge_potentials[ix,:t-1,self.PAD_ID,:] = BIG_NEG
+                assert self.PAD_ID == 0
+                edge_potentials[ix,t-1:,(self.PAD_ID+1):,:] = BIG_NEG
+            if self.args.instruction_chunker_memm:
+                edge_potentials[:,0,:,self.PAD_ID] = BIG_NEG
+            edge_potentials[:,0,:,self.INSIDE_INDICES] = BIG_NEG
+            return edge_potentials
+
+        edge_potentials = constrain(edge_potentials)
         edge_potentials[:,0,:,self.BEGIN_INDICES] += self.tag_init.view(1,1,self.tag_init.size(-1))
-        edge_potentials[:,0,:,self.INSIDE_INDICES] = BIG_NEG
         edge_potentials[:,:,:,:] += transition_mat.view(1,1,C,C)
 
         edge_potentials[:,:,:,:] += tag_unaries.view(batch, N, C, 1)[:, 1:]
         edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
+
+        if self.args.instruction_chunker_memm:
+            # maximum entropy Markov model
+            # make all incoming tag transitions locally normalized
+            edge_potentials = edge_potentials.log_softmax(dim=2)
+            # pytorch barfs when calculating the gradient if we in-place modified log_softmax, so clone (backprop still happens)
+            edge_potentials = edge_potentials.clone()
+            # need to constrain twice, since if we had all BIG_NEG in dim 2 slice, they will all become 0s and then get chosen
+            edge_potentials = constrain(edge_potentials)
 
         return edge_potentials
 
@@ -410,3 +428,4 @@ class SubgoalChunkerNoTransitions(SubgoalChunker):
         edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
 
         return edge_potentials
+
