@@ -26,7 +26,7 @@ def make_parser():
     # parser
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     add_data_args(parser)
-    Chunker.add_arguments(parser)
+    SubgoalChunker.add_arguments(parser)
 
     # other settings
     parser.add_argument('--seed', help='random seed', default=123, type=int)

@@ -450,7 +450,7 @@ class AlfredDataset(Dataset):
 class AlfredSubtrajectoryDataset(AlfredDataset):
     def __init__(self, args, data, model_class, test_mode, featurize=True, subgoal_names:Set[str]=None,
                  add_stop_in_subtrajectories=True,
-                 filter_instructions=True, subgoal_pairs=False):
+                 filter_instructions=True, subgoal_pairs=False, subgoal_pairs_and_singles=False):
         """
         :param args:
         :param data:
@@ -465,6 +465,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
         self.add_stop_in_subtrajectories = add_stop_in_subtrajectories
         self.filter_instructions = filter_instructions
         self.subgoal_pairs = subgoal_pairs
+        self.subgoal_pairs_and_singles = subgoal_pairs_and_singles
 
         if len(data) > 1000:
             iter = tqdm.tqdm(data, ncols=80, desc='dataset: getting subgoals')
@@ -473,9 +474,12 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
 
         for datum in iter:
             task = AlfredDataset.load_task_json_unsplit(self.args, datum)
+
+            singles = (not subgoal_pairs) or subgoal_pairs_and_singles
+            pairs = subgoal_pairs or subgoal_pairs_and_singles
             
             # Either extract contiguous subgoal pairs. 
-            if subgoal_pairs: 
+            if pairs:
         
                 # Get last high-level index. 
                 last_idx = task['plan']['high_pddl'][-1]['high_idx']
@@ -495,7 +499,7 @@ class AlfredSubtrajectoryDataset(AlfredDataset):
                     self._task_and_indices.append((task, pair))
 
             # Or extract all subgoals of a particular type.
-            else: 
+            if singles:
                 subgoal_indices = AlfredDataset.extract_subgoal_indices(
                     task, subgoal_names=subgoal_names, keep_noop=False
                 )
@@ -720,6 +724,7 @@ class BaseModule(nn.Module):
                 subgoal_names = None
 
             subgoal_pairs = args.subgoal_pairs
+            subgoal_pairs_and_singles = args.subgoal_pairs_and_singles
             add_stop_in_subtrajectories = args.add_stop_in_subtrajectories
 
             full_instructions = vars(args).get('train_on_subtrajectories_full_instructions', False)
@@ -727,7 +732,8 @@ class BaseModule(nn.Module):
                 args, tasks, self.__class__, False, subgoal_names=subgoal_names,
                 filter_instructions = not full_instructions,
                 add_stop_in_subtrajectories = add_stop_in_subtrajectories,
-                subgoal_pairs = subgoal_pairs
+                subgoal_pairs = subgoal_pairs,
+                subgoal_pairs_and_singles = subgoal_pairs_and_singles,
             )
         else:
             dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)

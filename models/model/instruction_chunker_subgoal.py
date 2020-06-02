@@ -67,12 +67,23 @@ class SubgoalChunker(BaseModule):
         parser.add_argument('--demb', help='language embedding size', default=100, type=int)
         parser.add_argument('--dhid', help='hidden layer size', default=128, type=int)
 
+        parser.add_argument('--instruction_chunker_memm', action='store_true', help='use a maximum entropy Markov model (rather than a CRF)')
+        parser.add_argument('--instruction_chunker_factored', action='store_true', help='predict tag types and whether to segment separately')
+
         # dropouts
         parser.add_argument('--lang_dropout', help='dropout rate for language instr', default=0., type=float)
 
     def add_tag_params(self):
         self.tag_init = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
         self.tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
+
+    def add_pred_layer(self):
+        if self.args.instruction_chunker_factored:
+            self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.SUBMODULE_NAMES))
+            self.segment_pred_layer = nn.Linear(self.args.dhid*2, 1)
+            self.pad_pred_layer = nn.Linear(self.args.dhid*2, 1)
+        else:
+            self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.LABEL_VOCAB))
 
     def __init__(self, args, vocab):
         super().__init__(args)
@@ -233,7 +244,13 @@ class SubgoalChunker(BaseModule):
             move_dict_to_cuda(feat)
 
         enc_lang = self.encode_lang(feat)
-        unaries = self.chunk_pred_layer(enc_lang)
+        if self.args.instruction_chunker_factored:
+            pad_scores = self.pad_pred_layer(enc_lang)
+            inside_module_scores = self.chunk_pred_layer(enc_lang)
+            begin_module_scores = self.segment_pred_layer(enc_lang) + inside_module_scores
+            unaries = torch.cat((pad_scores, begin_module_scores, inside_module_scores), dim=-1)
+        else:
+            unaries = self.chunk_pred_layer(enc_lang)
 
         edge_potentials = self.make_potentials(unaries, feat['lang_instr_len'])
         dist = LinearChainCRF(edge_potentials, lengths=feat['lang_instr_len'])
