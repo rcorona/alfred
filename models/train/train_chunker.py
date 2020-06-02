@@ -48,6 +48,8 @@ def make_parser():
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
     parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
+    parser.add_argument('--subgoal_pairs_and_singles', help='Train on contiguous subgoal pairs and single subgoals.', action='store_true')
+    parser.add_argument('--subgoal_pairs_validate_full', help='but use full datasets for validation', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")

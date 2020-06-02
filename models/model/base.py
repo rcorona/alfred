@@ -716,6 +716,8 @@ class BaseModule(nn.Module):
         random_state.shuffle(train_subset)
         train_subset = train_subset[::20]
 
+        full_dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
+
         # this isn't implemented for instruction_chunker
         if vars(args).get('train_on_subtrajectories', False) or vars(args).get('train_on_subtrajectories_full_instructions', False):
             if args.subgoal:
@@ -736,12 +738,16 @@ class BaseModule(nn.Module):
                 subgoal_pairs_and_singles = subgoal_pairs_and_singles,
             )
         else:
-            dataset_constructor = lambda tasks: AlfredDataset(args, tasks, self.__class__, False)
+            dataset_constructor = full_dataset_constructor
 
         # Put dataset splits into wrapper class for parallelizing data-loading.
         train = dataset_constructor(train)
-        valid_seen = dataset_constructor(valid_seen)
-        valid_unseen = dataset_constructor(valid_unseen)
+        if args.subgoal_pairs_validate_full:
+            valid_seen = full_dataset_constructor(valid_seen)
+            valid_unseen = full_dataset_constructor(valid_unseen)
+        else:
+            valid_seen = dataset_constructor(valid_seen)
+            valid_unseen = dataset_constructor(valid_unseen)
         train_subset = dataset_constructor(train_subset)
 
         # setting this to True didn't seem to give a speedup

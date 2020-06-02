@@ -99,7 +99,7 @@ class SubgoalChunker(BaseModule):
 
         self.bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
 
-        self.chunk_pred_layer = nn.Linear(args.dhid*2, len(self.LABEL_VOCAB))
+        self.add_pred_layer()
 
         self.add_tag_params()
 
