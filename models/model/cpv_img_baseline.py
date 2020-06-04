@@ -31,7 +31,7 @@ class AlfredBaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-        self.vis_encoder = ResnetVisualEncoder(dframe=256)
+
 
     def get_task_root(self, ex):
         '''
@@ -52,16 +52,16 @@ class AlfredBaselineDataset(Dataset):
             if keep[img_info['low_idx']] is None:
                 keep[img_info['low_idx']] = (im[idx], img_info['high_idx'])
         keep.append((keep[-1][0], keep[-1][1]+1))  # stop frame
-        high_level = self.vis_encoder(torch.stack([keep[j][0] for j in range(len(keep))], dim=0)).type(torch.float) # seqlen x 512 x 7 x 7
-        low_level_context = [self.vis_encoder(torch.stack([keep[j][0] for j in range(len(keep)) if keep[j][1] == i], dim=0)).type(torch.float) for i in range(len(ex['ann']['instr']))] # seqlen x 512 x 7 x 7
+        high_level = torch.stack([keep[j][0] for j in range(len(keep))], dim=0).type(torch.float) # N x 512 x 7 x 7
+        low_level_context = [torch.stack([keep[j][0] for j in range(len(keep)) if keep[j][1] == i], dim=0).type(torch.float) for i in range(len(ex['ann']['instr']))] # N x 512 x 7 x 7
 
-        high_level = high_level.to(self.device)
-        low_level_context = [ll.to(self.device) for ll in low_level_context]
+        high_level = high_level
+        low_level_context = [ll for ll in low_level_context]
         target_idx = random.randrange(len(low_level_context))
         low_level_target = low_level_context[target_idx]
         del low_level_context[target_idx]
 
-        padded_context = torch.cat([high_level] + [torch.tensor(self.seg, dtype = torch.float).repeat(1, 256).to(self.device)] + low_level_context, dim=0)
+        padded_context = torch.cat([high_level] + [torch.tensor(self.seg, dtype = torch.float).repeat(1, 512, 7, 7)] + low_level_context, dim=0)
         return (padded_context, low_level_target)
 
     def __getitem__(self, idx):
@@ -91,7 +91,7 @@ class AlfredBaselineDataset(Dataset):
             for idx in range(batch_size):
                 contexts.append(batch[idx][0])
                 targets.append(batch[idx][1])
-                labels.append(torch.tensor(idx).unsqueeze(0).to(self.device))
+                labels.append(torch.tensor(idx).unsqueeze(0))
 
             padded_contexts = pad_sequence(contexts, batch_first=True)
             padded_targets = pad_sequence(targets,  batch_first=True)
@@ -100,34 +100,6 @@ class AlfredBaselineDataset(Dataset):
             return (padded_contexts, padded_targets, padded_labels)
 
         return collate_fn
-
-class ResnetVisualEncoder(nn.Module):
-    '''
-    visual encoder
-    '''
-
-    def __init__(self, dframe):
-        super(ResnetVisualEncoder, self).__init__()
-        self.dframe = dframe
-        self.flattened_size = 64*7*7
-
-        self.conv1 = nn.Conv2d(512, 256, kernel_size=1, stride=1, padding=0)
-        self.conv2 = nn.Conv2d(256, 64, kernel_size=1, stride=1, padding=0)
-        self.fc = nn.Linear(self.flattened_size, self.dframe)
-        self.bn1 = nn.BatchNorm2d(256)
-        self.bn2 = nn.BatchNorm2d(64)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(self.bn1(x))
-
-        x = self.conv2(x)
-        x = F.relu(self.bn2(x))
-
-        x = x.view(-1, self.flattened_size)
-        x = self.fc(x)
-
-        return x
 
 
 class Module(Base):
@@ -143,36 +115,64 @@ class Module(Base):
         self.vocab = vocab
 
         # encoder and self-attention
-        self.embed = nn.Embedding(64, args.demb)
-        self.enc = nn.LSTM(256, args.dhid, bidirectional=True, batch_first=True)
+        self.vis_encoder = vnn.ResnetVisualEncoder(dframe=self.args.dframe)
+        self.enc = nn.LSTM(self.args.dframe, args.dhid, bidirectional=True, batch_first=True)
         self.to(self.device)
 
 
-    def encoder(self, batch):
+    def encoder(self, batch, batch_size):
         '''
         Input: stacked tensor of [high_level, seq, low_level_context]
         '''
+        ### INPUTS ###
+        # Batch -> B x H x E
 
-        # x = x.view(-1, self.flattened_size)
-        # x = self.fc(x)
-        # embedded = self.embed(torch.transpose(batch, 0, 1))
-        # print(embedded.shape)
-        # Input h,c are randomized/zero or should be prev
-        h_0 = torch.zeros(2, batch.shape[0], self.args.dhid).type(torch.float).to(self.device)
-        c_0 = torch.zeros(2, batch.shape[0], self.args.dhid).type(torch.float).to(self.device)
-        out, (h, c) = self.enc(batch, (h_0, c_0))
-        torch.sum(h, dim=0)
+        ### LSTM ###
+        h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        out, (h, c) = self.enc(batch, (h_0, c_0)) # -> L * 2 x B x H
 
-        # Add small feed forward/projection layer + ReLU?
-        return torch.sum(h, dim=0)
+        ## COMB ##
+        hid_sum = torch.sum(h, dim=0) # -> B x H
+
+        return hid_sum
 
     def forward(self, contexts, targets):
         '''
         Takes in contexts and targets and returns the dot product of each enc(context) with each enc(target)
         '''
-        enc_contexts = self.encoder(contexts) # N x Emb
-        enc_targets = self.encoder(targets) # C x Emb
-        sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # N x C
+        ### INPUT ###
+        # Contexts ->  B x N x 512 x 7 x 7 (N = Contexts Seq Len)
+        # Targets -> B x T x 512 x 7 x 7 (T =  Targets Seq Len)
+
+        batch_size = contexts.shape[0]
+        contexts_seq_len = contexts.shape[1]
+        targets_seq_len = targets.shape[1]
+        resnet_size = (contexts.shape[2], contexts.shape[3], contexts.shape[4])
+
+        ### CONTEXTS ###
+        # Reshaping:
+        flat_contexts = contexts.reshape(batch_size * contexts_seq_len, resnet_size[0], resnet_size[1], resnet_size[2]) # -> B * N x 512 x 7 x 7
+        # Dimension Reduction:
+        emb_contexts = self.vis_encoder(flat_contexts) # -> B * N x E
+        # Reshaping:
+        tall_contexts = emb_contexts.reshape(batch_size, contexts_seq_len, self.args.dframe) # -> B x N x E
+        # Encoding:
+        enc_contexts = self.encoder(tall_contexts, batch_size) # -> B x H (H = hidden dim of LSTM)
+
+        ### TARGETS ###
+        # Reshaping
+        flat_targets = targets.reshape(batch_size * targets_seq_len,  resnet_size[0], resnet_size[1], resnet_size[2]) # -> B * T x 512 x 7 x 7
+        # Dimension Reduction:
+        emb_targets = self.vis_encoder(flat_targets) # -> B * T x E
+        # Reshaping:
+        tall_targets = emb_targets.reshape(batch_size, targets_seq_len, self.args.dframe) # -> B x T x E
+        #Encoding:
+        enc_targets = self.encoder(tall_targets, batch_size) # -> B x H
+
+        ### COMB ###
+        # Dot Product:
+        sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
 
         return logits
@@ -183,23 +183,20 @@ class Module(Base):
         self.writer = SummaryWriter('runs/img_baseline')
         fsave = os.path.join(args.dout, 'best.pth')
 
-        # Loading Data
-        # splits = self.load_data_into_ram()
-        # valid_idx = np.arange(start=0, stop=len(splits), step=10)
-        # eval_idx = np.arange(start=1, stop=len(splits), step=10)
-        # train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
-
+        # Get splits
         train_data = splits['train']
         valid_data = splits['valid_seen'] + splits['valid_unseen']
 
+        # Initialize Datasets
         valid_dataset = AlfredBaselineDataset(self.args, valid_data)
         train_dataset = AlfredBaselineDataset(self.args, train_data)
 
-        valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, collate_fn=valid_dataset.collate())
-        train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, collate_fn=train_dataset.collate())
+        # Initialize Dataloaders
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=valid_dataset.collate())
+        train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=train_dataset.collate())
 
         # Optimizer
-        optimizer = optimizer or torch.optim.Adam(self.parameters(), lr=args.lr)
+        optimizer = optimizer or torch.optim.Adam(list(self.parameters()) + list(self.vis_encoder.parameters()), lr=args.lr)
 
         # Training loop
         best_loss = 1e10
@@ -209,22 +206,32 @@ class Module(Base):
             total_train_loss = torch.tensor(0, dtype=torch.float)
             total_train_acc = torch.tensor(0, dtype=torch.float)
             total_train_size = torch.tensor(0, dtype=torch.float)
-            i = 0
             print(len(train_loader))
             for batch in train_loader:
-                # print(i)
-                i += 1
                 optimizer.zero_grad()
                 contexts, targets, labels = batch
+
+                # Transfer to GPU
+                contexts = contexts.to(self.device)
+                targets = targets.to(self.device)
+                labels = labels.to(self.device)
+
+                # Forward
                 logits = self.forward(contexts, targets)
+
+                # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
                 total_train_loss += loss
                 total_train_size += labels.shape[0]
                 most_likely = torch.argmax(logits, dim=1)
                 acc = torch.eq(most_likely, labels)
                 total_train_acc += torch.sum(acc)
+
+                # Backpropogate
                 loss.backward()
                 optimizer.step()
+
+            # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/train', (total_train_acc/total_train_size).item(), epoch)
             self.writer.add_scalar('Loss/train', total_train_loss.item(), epoch)
             print("Train Accuracy: " + str((total_train_acc/total_train_size).item()))
@@ -237,18 +244,30 @@ class Module(Base):
             with torch.no_grad():
                 for batch in valid_loader:
                     contexts, targets, labels = batch
+
+                    # Transfer to GPU
+                    contexts = contexts.to(self.device)
+                    targets = targets.to(self.device)
+                    labels = labels.to(self.device)
+
+                    # Forward
                     logits = self.forward(contexts, targets)
+
+                    # Calculate Loss and Accuracy
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
                     total_valid_size += labels.shape[0]
                     most_likely = torch.argmax(logits, dim=1)
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
+
+                # Write to TensorBoardX
                 self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
                 self.writer.add_scalar('Loss/validation', total_valid_loss.item(), epoch)
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
 
+            # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
                 torch.save({
@@ -258,30 +277,3 @@ class Module(Base):
                     'vocab': self.vocab
                 }, fsave)
                 best_loss = total_valid_loss
-
-
-
-            # Loss is going down but accuracy remains at zero
-
-    def load_data_into_ram(self):
-        '''
-        Loads all data into RAM
-        '''
-        # Load data from all_data.json (language only dataset)
-        json_path = os.path.join(self.args.data, "all_data.json")
-        with open(json_path) as f:
-            raw_data = json.load(f)
-
-        # Turn data into array of [high_level, low_level_context, low_level_target, target_idx]
-        split_data = []
-        for key in raw_data.keys():
-            for r_idx in range(len(raw_data[key]["high_level"])):
-                high_level = raw_data[key]["high_level"][r_idx]
-                low_levels = raw_data[key]["low_level"][r_idx]
-                split_data += [{"high_level": high_level, "low_level_context": low_levels}]
-
-        return split_data
-
-
-# Loss is going down but accuracy remains at zero
-# Switched from concatenation to sum of h for encoding - problem?
