@@ -32,31 +32,49 @@ class AlfredBaselineDataset(Dataset):
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
 
+
+    def get_task_root(self, ex):
+        '''
+        returns the folder path of a trajectory
+        '''
+        return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
+
+
     def featurize(self, ex):
         '''
         tensorize and pad batch input
         '''
-        # Collect instructions from dictionary
-        high_level = torch.tensor(ex["high_level"]) # -> seq_len
-        low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]] # -> seq_len
 
-        # Remove target instruction
+        # Low levels are image trajectories
+        root = self.get_task_root(ex)
+        im = torch.load(os.path.join(root, "feat_conv.pt")) # sizes of images are 512 x 7 x 7
+        keep = [None] * len(ex['plan']['low_actions'])
+        for idx, img_info in enumerate(ex['images']): # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+            if keep[img_info['low_idx']] is None:
+                keep[img_info['low_idx']] = (im[idx], img_info['high_idx'])
+        keep.append((keep[-1][0], keep[-1][1]+1))  # stop frame
+        low_level_context = [torch.stack([keep[j][0] for j in range(len(keep)) if keep[j][1] == i], dim=0).type(torch.float) for i in range(len(ex['ann']['instr']))] # -> N x 512 x 7 x 7
+
+        # High level and target are language instructions
+        high_level = torch.tensor(ex['num']['lang_goal']).type(torch.long) # -> M
         target_idx = random.randrange(len(low_level_context))
-        low_level_target = low_level_context[target_idx] # -> T
+        low_level_target = torch.tensor(ex['num']['lang_instr'][target_idx]) # -> T
         del low_level_context[target_idx]
 
-        # Stack instructions
-        padded_context = torch.cat([high_level] + [torch.tensor(self.seg).unsqueeze(0)] + low_level_context, dim=0) # -> N
-
-        return (padded_context, low_level_target)
+        padded_context = torch.cat(low_level_context, dim=0) # -> N x 512 x 7 x 7
+        return (high_level, padded_context, low_level_target)
 
     def __getitem__(self, idx):
 
         # Load task from dataset.
         task = self.data[idx]
 
+        json_path = os.path.join(self.args.data, task['task'], '%s' % self.args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        with open(json_path) as f:
+            data = json.load(f)
+
         # Create dict of features from dict.
-        feat = self.featurize(task)
+        feat = self.featurize(data)
 
         return feat
 
@@ -67,22 +85,26 @@ class AlfredBaselineDataset(Dataset):
         def collate_fn(batch):
             batch_size = len(batch)
 
+            highs = []
             contexts = []
             targets = []
             labels = []
             for idx in range(batch_size):
-                contexts.append(batch[idx][0])
-                targets.append(batch[idx][1])
+
+                highs.append(batch[idx][0])
+                contexts.append(batch[idx][1])
+                targets.append(batch[idx][2])
                 labels.append(torch.tensor(idx).unsqueeze(0))
 
-            padded_contexts = pad_sequence(contexts, batch_first=True) # -> B x N
-            padded_targets = pad_sequence(targets, batch_first=True) # -> B x T
-            padded_labels = torch.cat(labels, dim=0) # -> B
 
-            return (padded_contexts, padded_targets, padded_labels)
+            padded_highs = pad_sequence(highs, batch_first=True) # -> B x M (M = longest high seq)
+            padded_contexts = pad_sequence(contexts, batch_first=True) # -> B x N x 512 x 7 x 7
+            padded_targets = pad_sequence(targets,  batch_first=True) # -> B x T (T = longest target seq)
+            padded_labels = torch.cat(labels, dim=0)
+
+            return (padded_highs, padded_contexts, padded_targets, padded_labels)
 
         return collate_fn
-
 
 
 class Module(Base):
@@ -99,7 +121,9 @@ class Module(Base):
 
         # encoder and self-attention
         self.embed = nn.Embedding(len(self.vocab['word']), args.demb)
-        self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(args.demb, args.dframe)
+        self.vis_encoder = vnn.ResnetVisualEncoder(dframe=self.args.dframe)
+        self.enc = nn.LSTM(self.args.dframe, args.dhid, bidirectional=True, batch_first=True)
         self.to(self.device)
 
 
@@ -117,61 +141,76 @@ class Module(Base):
 
         ## COMB ##
         hid_sum = torch.sum(h, dim=0) # -> B x H
+
         return hid_sum
 
-    def forward(self, contexts, targets):
+    def forward(self, highs, contexts, targets):
         '''
         Takes in contexts and targets and returns the dot product of each enc(context) with each enc(target)
         '''
         ### INPUT ###
-        # Contexts -> B x N
-        # Targets -> B x T
-        batch_size = contexts.shape[0]
+        # Highs -> B x M (M = Highs Seq Len)
+        # Contexts ->  B x N x 512 x 7 x 7 (N = Contexts Seq Len)
+        # Targets -> B x T (T = Targets Seq Len)
 
-        ### CONTEXTS ###
+        batch_size = contexts.shape[0]
+        contexts_seq_len = contexts.shape[1]
+        targets_seq_len = targets.shape[1]
+        resnet_size = (contexts.shape[2], contexts.shape[3], contexts.shape[4])
+
+        ### HIGHS & CONTEXTS ###
         # Embedding:
-        emb_contexts = self.embed(contexts) # -> B x N x E
+        emb_highs = self.embed(highs) # -> B x M x D
+        # Projection from lang embedding dimension to image embedding dimension:
+        tall_highs = self.linear(emb_highs) # -> B x M x E
+        # Reshaping:
+        flat_contexts = contexts.reshape(batch_size * contexts_seq_len, resnet_size[0], resnet_size[1], resnet_size[2]) # -> B * N x 512 x 7 x 7
+        # Dimension Reduction:
+        emb_contexts = self.vis_encoder(flat_contexts) # -> B * N x E
+        # Reshaping:
+        tall_contexts = emb_contexts.reshape(batch_size, contexts_seq_len, self.args.dframe) # -> B x N x E
+        # Concatenating highs and lows:
+        comb_contexts = torch.cat([tall_highs, torch.tensor(self.seg).repeat(batch_size, 1, self.args.dframe).to(self.device).type(torch.float), tall_contexts], dim=1) # -> B x N + 1 + M x E
         # Encoding:
-        enc_contexts = self.encoder(emb_contexts, batch_size) # -> B x H
+        enc_contexts = self.encoder(comb_contexts, batch_size) # -> B x H (H = hidden dim of LSTM)
 
         ### TARGETS ###
         # Embedding:
         emb_targets = self.embed(targets) # -> B x T x E
+        # Projection from lang embedding dimension to image embedding dimension:
+        tall_targets = self.linear(emb_targets) # -> B x M x E
         # Encoding:
-        enc_targets = self.encoder(emb_targets, batch_size) # -> B x H
+        enc_targets = self.encoder(tall_targets, batch_size) # -> B x H
 
         ### COMB ###
-        # Dot product:
-        sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # B x B
+        # Dot Product:
+        sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
 
         return logits
 
     def run_train(self, splits, optimizer, args=None):
 
-        ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/lang_baseline')
+        self.writer = SummaryWriter('runs/multi_baseline')
         fsave = os.path.join(args.dout, 'best.pth')
 
-        # Getting splits
-        splits = self.load_data_into_ram()
-        valid_idx = np.arange(start=0, stop=len(splits), step=10)
-        eval_idx = np.arange(start=1, stop=len(splits), step=10)
-        train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
+        # Get splits
+        train_data = splits['train']
+        valid_data = splits['valid_seen'] + splits['valid_unseen']
 
         # Initialize Datasets
-        valid_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in valid_idx])
-        train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
+        valid_dataset = AlfredBaselineDataset(self.args, valid_data)
+        train_dataset = AlfredBaselineDataset(self.args, train_data)
 
-        # Initalize Dataloaders
-        valid_loader = DataLoader(valid_dataset, batch_size=self.args.batch, shuffle=True, num_workers=8, collate_fn=valid_dataset.collate())
-        train_loader = DataLoader(train_dataset, batch_size=self.args.batch, shuffle=True, num_workers=8, collate_fn=train_dataset.collate())
+        # Initialize Dataloaders
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=valid_dataset.collate())
+        train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=8, collate_fn=train_dataset.collate())
 
         # Optimizer
-        optimizer = optimizer or torch.optim.Adam(self.parameters(), lr=args.lr)
+        optimizer = optimizer or torch.optim.Adam(list(self.parameters()) + list(self.vis_encoder.parameters()), lr=args.lr)
 
-        ### TRAINING LOOP ###
+        # Training loop
         best_loss = 1e10
         for epoch in range(args.epoch):
             print('Epoch', epoch)
@@ -179,17 +218,20 @@ class Module(Base):
             total_train_loss = torch.tensor(0, dtype=torch.float)
             total_train_acc = torch.tensor(0, dtype=torch.float)
             total_train_size = torch.tensor(0, dtype=torch.float)
+            print(len(train_loader))
+
             for batch in train_loader:
                 optimizer.zero_grad()
-                contexts, targets, labels = batch
+                highs, contexts, targets, labels = batch
 
                 # Transfer to GPU
+                highs = highs.to(self.device)
                 contexts = contexts.to(self.device)
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
 
                 # Forward
-                logits = self.forward(contexts, targets)
+                logits = self.forward(highs, contexts, targets)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -215,17 +257,18 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    contexts, targets, labels = batch
+                    highs, contexts, targets, labels = batch
 
                     # Transfer to GPU
+                    highs = highs.to(self.device)
                     contexts = contexts.to(self.device)
                     targets = targets.to(self.device)
                     labels = labels.to(self.device)
 
                     # Forward
-                    logits = self.forward(contexts, targets)
+                    logits = self.forward(highs, contexts, targets)
 
-                    # Calcualte Loss and Accuracy
+                    # Calculate Loss and Accuracy
                     loss = F.nll_loss(logits, labels)
                     total_valid_loss += loss
                     total_valid_size += labels.shape[0]
@@ -249,23 +292,3 @@ class Module(Base):
                     'vocab': self.vocab
                 }, fsave)
                 best_loss = total_valid_loss
-
-
-    def load_data_into_ram(self):
-        '''
-        Loads all data into RAM
-        '''
-        # Load data from all_data.json (language only dataset)
-        json_path = os.path.join(self.args.data, "all_data.json")
-        with open(json_path) as f:
-            raw_data = json.load(f)
-
-        # Turn data into array of [high_level, low_level_context, low_level_target, target_idx]
-        split_data = []
-        for key in raw_data.keys():
-            for r_idx in range(len(raw_data[key]["high_level"])):
-                high_level = raw_data[key]["high_level"][r_idx]
-                low_levels = raw_data[key]["low_level"][r_idx]
-                split_data += [{"high_level": high_level, "low_level_context": low_levels}]
-
-        return split_data
