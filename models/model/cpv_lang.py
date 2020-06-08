@@ -71,10 +71,13 @@ class AlfredBaselineDataset(Dataset):
             contexts = []
             targets = []
             labels = []
-            all_sorted_lengths = []
+
+            highs_lens =  torch.tensor([batch[idx][0].shape[0] for idx in range(batch_size)], dtype=torch.long) # -> B
+            contexts_lens = []
+            targets_lens = torch.tensor([batch[idx][2].shape[0] for idx in range(batch_size)], dtype=torch.long) # -> B
 
             # Array of number of low level instructions for each high level
-            lengths = torch.tensor([len(batch[idx][1]) for idx in range(batch_size)], dtype=torch.long) # -> B
+            contexts_nums = torch.tensor([len(batch[idx][1]) for idx in range(batch_size)], dtype=torch.long) # -> B
 
             # Calculate longest seqence (L) - this is the number we will be padding the low level instructions to
             longest_seq = 0
@@ -87,14 +90,14 @@ class AlfredBaselineDataset(Dataset):
                 padded_contexts = torch.zeros((len(batch[idx][1]), longest_seq), dtype=torch.long) # -> num_ll x L
 
                 # Keep track of original lengths of each tensor for masking
-                context_lengths = torch.tensor([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))], dtype=torch.long) # -> num_ll
+                curr_context_lens = torch.tensor([batch[idx][1][seq].shape[0] for seq in range(len(batch[idx][1]))], dtype=torch.long) # -> num_ll
 
                 # Copy entire low level tensor into padded tensor
                 for seq_idx in range(len(batch[idx][1])):
                     padded_contexts[seq_idx, :batch[idx][1][seq_idx].shape[0]] = batch[idx][1][seq_idx] # -> num_ll x L
 
                 # Sory by length for packing
-                sorted_lengths, sort_idx = torch.sort(context_lengths, 0, descending=True) # -> num_ll
+                sorted_lengths, sort_idx = torch.sort(curr_context_lens , 0, descending=True) # -> num_ll
                 sorted_contexts = padded_contexts[sort_idx]
 
                 # Append all data to arrays for padding
@@ -102,21 +105,21 @@ class AlfredBaselineDataset(Dataset):
                 contexts.append(sorted_contexts) # -> num_ll x L
                 targets.append(batch[idx][2]) # -> seq_len
                 labels.append(torch.tensor(idx).unsqueeze(0)) # -> 1
-                all_sorted_lengths.append(sorted_lengths) # -> num_ll
+                contexts_lens.append(sorted_lengths) # -> num_ll
 
             # Pad all sequences to make big tensors
-            padded_lengths = pad_sequence(all_sorted_lengths, batch_first=True, padding_value=longest_seq) # -> B x NL
+            contexts_lens = pad_sequence(contexts_lens, batch_first=True, padding_value=longest_seq) # -> B x NL
             packed_contexts = pad_sequence(contexts, batch_first=True) # -> B x NL x L (NL = Largest # of Low Levels)
             padded_highs = pad_sequence(highs, batch_first=True) # -> B x M (M = Longest High Level)
             padded_targets = pad_sequence(targets, batch_first=True) # -> B x T (T = Longest Target)
             padded_labels = torch.cat(labels, dim=0) # -> B
 
             # Mask for the second level of padding on low levels - pad on # of low levels
-            mask = torch.zeros((batch_size, lengths.max()), dtype=torch.float) # -> B x NL
+            mask = torch.zeros((batch_size, contexts_nums.max()), dtype=torch.float) # -> B x NL
             for idx in range(batch_size):
-                mask[idx, :lengths[idx]] = torch.ones((lengths[idx],))
+                mask[idx, :contexts_nums[idx]] = torch.ones((contexts_nums[idx],))
 
-            return (padded_highs, packed_contexts, padded_targets, padded_labels, padded_lengths, mask)
+            return (padded_highs, packed_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, mask)
         return collate_fn
 
 
@@ -154,7 +157,7 @@ class Module(Base):
         # Add small feed forward/projection layer + ReLU?
         return torch.sum(h, dim=0)
 
-    def forward(self, highs, contexts, targets, lengths, mask):
+    def forward(self, highs, contexts, targets, highs_lens, contexts_lens, targets_lens, mask):
         '''
         Takes in contexts and targets and returns the dot product of each enc(high) - enc(context) with each enc(target)
         '''
@@ -162,7 +165,9 @@ class Module(Base):
         # Highs ->  B x M (M = Highs Seq Len)
         # Contexts -> B x NL x L (NL = Largest # of Low Levels, L = Lows Seq Len)
         # Targets -> B x T (T = Targets Seq Len)
-        # Lengths -> B x NL
+        # Highs_Lens -> B
+        # Contexts_Lens -> B x NL
+        # Targets_Lens -> B
         # Mask -> B x NL
 
         batch_size = contexts.shape[0]
@@ -172,13 +177,15 @@ class Module(Base):
         ### HIGHS ###
         # Embedding:
         embed_highs = self.embed(highs) # -> B x M x E (E = embedding size)
+        # Packing:
+        packed_highs = pack_padded_sequence(embed_highs, highs_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_highs = self.encoder(embed_highs, batch_size) # -> B x H
+        enc_highs = self.encoder(packed_highs, batch_size) # -> B x H
 
         ### CONTEXTS ###
         # Reshaping:
         flat_contexts = contexts.reshape(batch_size * contexts_num, contexts_len) # -> B * NL x L
-        flat_lengths = lengths.reshape(batch_size * contexts_num) # -> B * NL
+        flat_lengths = contexts_lens.reshape(batch_size * contexts_num) # -> B * NL
         # Embedding:
         embed_contexts = self.embed(flat_contexts) # -> B * NL x L x E
         # Packing:
@@ -195,8 +202,10 @@ class Module(Base):
         ### TARGETS ###
         # Embedding:
         embed_targets = self.embed(targets) # -> B x T x E
+        # Packing:
+        packed_targets = pack_padded_sequence(embed_targets, targets_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_targets = self.encoder(embed_targets, batch_size) # B x H
+        enc_targets = self.encoder(packed_targets, batch_size) # B x H
 
         ### COMB ###
         # Combining high levels and low levels:
@@ -241,18 +250,20 @@ class Module(Base):
             total_train_size = torch.tensor(0, dtype=torch.float)
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, lengths, mask = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
                 contexts = contexts.to(self.device)
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
-                lengths = lengths.to(self.device)
+                highs_lens = highs_lens.to(self.device)
+                contexts_lens = contexts_lens.to(self.device)
+                targets_lens = targets_lens.to(self.device)
                 mask = mask.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets, lengths, mask)
+                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens, mask)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -278,18 +289,20 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels, lengths, mask = batch
+                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask = batch
 
                     # Transfer to GPU
                     highs = highs.to(self.device)
                     contexts = contexts.to(self.device)
                     targets = targets.to(self.device)
                     labels = labels.to(self.device)
-                    lengths = lengths.to(self.device)
+                    highs_lens = highs_lens.to(self.device)
+                    contexts_lens = contexts_lens.to(self.device)
+                    targets_lens = targets_lens.to(self.device)
                     mask = mask.to(self.device)
 
                     # Forward
-                    logits = self.forward(highs, contexts, targets, lengths, mask)
+                    logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens, mask)
 
                     # Calculate Loss and Accuracy
                     loss = F.nll_loss(logits, labels)
@@ -305,6 +318,7 @@ class Module(Base):
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
 
+            self.writer.flush()
             # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
@@ -316,6 +330,7 @@ class Module(Base):
                 }, fsave)
                 best_loss = total_valid_loss
 
+        self.writer.close()
 
     def load_data_into_ram(self):
         '''

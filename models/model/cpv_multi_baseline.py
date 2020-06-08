@@ -89,11 +89,18 @@ class AlfredBaselineDataset(Dataset):
             contexts = []
             targets = []
             labels = []
-            for idx in range(batch_size):
 
+            highs_lens = []
+            contexts_lens = []
+            targets_lens = []
+
+            for idx in range(batch_size):
                 highs.append(batch[idx][0])
+                highs_lens.append(batch[idx][0].shape[0])
                 contexts.append(batch[idx][1])
+                contexts_lens.append(batch[idx][1].shape[0])
                 targets.append(batch[idx][2])
+                targets_lens.append(batch[idx][2].shape[0])
                 labels.append(torch.tensor(idx).unsqueeze(0))
 
 
@@ -102,7 +109,11 @@ class AlfredBaselineDataset(Dataset):
             padded_targets = pad_sequence(targets,  batch_first=True) # -> B x T (T = longest target seq)
             padded_labels = torch.cat(labels, dim=0)
 
-            return (padded_highs, padded_contexts, padded_targets, padded_labels)
+            highs_lens = torch.tensor(highs_lens)
+            contexts_lens = torch.tensor(contexts_lens)
+            targets_lens = torch.tensor(targets_lens)
+
+            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens)
 
         return collate_fn
 
@@ -127,7 +138,7 @@ class Module(Base):
         self.to(self.device)
 
 
-    def encoder(self, batch, batch_size):
+    def encoder(self, batch, batch_size, h_0, c_0):
         '''
         Input: stacked tensor of [high_level, seq, low_level_context]
         '''
@@ -135,16 +146,17 @@ class Module(Base):
         # Batch -> B x H x E
 
         ### LSTM ###
-        h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
-        c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
         out, (h, c) = self.enc(batch, (h_0, c_0)) # -> L * 2 x B x H
 
         ## COMB ##
         hid_sum = torch.sum(h, dim=0) # -> B x H
 
-        return hid_sum
+        return hid_sum, h, c
 
-    def forward(self, highs, contexts, targets):
+    def forward(self, highs, contexts, targets, highs_lens, contexts_lens, targets_lens):
         '''
         Takes in contexts and targets and returns the dot product of each enc(context) with each enc(target)
         '''
@@ -163,24 +175,30 @@ class Module(Base):
         emb_highs = self.embed(highs) # -> B x M x D
         # Projection from lang embedding dimension to image embedding dimension:
         tall_highs = self.linear(emb_highs) # -> B x M x E
+        # Packing:
+        packed_highs = pack_padded_sequence(tall_highs, highs_lens, batch_first=True, enforce_sorted=False)
+        # Encoding:
+        enc_highs, h_t, c_t = self.encoder(packed_highs, batch_size, None, None) # -> L * 2 x B x H
         # Reshaping:
         flat_contexts = contexts.reshape(batch_size * contexts_seq_len, resnet_size[0], resnet_size[1], resnet_size[2]) # -> B * N x 512 x 7 x 7
         # Dimension Reduction:
         emb_contexts = self.vis_encoder(flat_contexts) # -> B * N x E
         # Reshaping:
         tall_contexts = emb_contexts.reshape(batch_size, contexts_seq_len, self.args.dframe) # -> B x N x E
-        # Concatenating highs and lows:
-        comb_contexts = torch.cat([tall_highs, torch.tensor(self.seg).repeat(batch_size, 1, self.args.dframe).to(self.device).type(torch.float), tall_contexts], dim=1) # -> B x N + 1 + M x E
+        # Packing:
+        packed_contexts = pack_padded_sequence(tall_contexts, contexts_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_contexts = self.encoder(comb_contexts, batch_size) # -> B x H (H = hidden dim of LSTM)
+        enc_contexts, _, _ = self.encoder(packed_contexts, batch_size, h_t, c_t) # -> B x H
 
         ### TARGETS ###
         # Embedding:
         emb_targets = self.embed(targets) # -> B x T x E
         # Projection from lang embedding dimension to image embedding dimension:
         tall_targets = self.linear(emb_targets) # -> B x M x E
+        # Packing:
+        packed_targets = pack_padded_sequence(tall_targets, targets_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_targets = self.encoder(tall_targets, batch_size) # -> B x H
+        enc_targets, _, _ = self.encoder(packed_targets, batch_size, None, None) # -> B x H
 
         ### COMB ###
         # Dot Product:
@@ -222,16 +240,19 @@ class Module(Base):
 
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
                 contexts = contexts.to(self.device)
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
+                highs_lens = highs_lens.to(self.device)
+                contexts_lens = contexts_lens.to(self.device)
+                targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets)
+                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -257,16 +278,19 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels = batch
+                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens = batch
 
                     # Transfer to GPU
                     highs = highs.to(self.device)
                     contexts = contexts.to(self.device)
                     targets = targets.to(self.device)
                     labels = labels.to(self.device)
+                    highs_lens = highs_lens.to(self.device)
+                    contexts_lens = contexts_lens.to(self.device)
+                    targets_lens = targets_lens.to(self.device)
 
                     # Forward
-                    logits = self.forward(highs, contexts, targets)
+                    logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                     # Calculate Loss and Accuracy
                     loss = F.nll_loss(logits, labels)
@@ -282,6 +306,7 @@ class Module(Base):
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
 
+            self.writer.flush()
             # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
@@ -292,3 +317,5 @@ class Module(Base):
                     'vocab': self.vocab
                 }, fsave)
                 best_loss = total_valid_loss
+
+        self.writer.close()

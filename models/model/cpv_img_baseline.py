@@ -88,16 +88,25 @@ class AlfredBaselineDataset(Dataset):
             contexts = []
             targets = []
             labels = []
+
+            contexts_lens = []
+            targets_lens = []
+
             for idx in range(batch_size):
                 contexts.append(batch[idx][0])
+                contexts_lens.append(batch[idx][0].shape[0])
                 targets.append(batch[idx][1])
+                targets_lens.append(batch[idx][1].shape[0])
                 labels.append(torch.tensor(idx).unsqueeze(0))
 
             padded_contexts = pad_sequence(contexts, batch_first=True)
             padded_targets = pad_sequence(targets,  batch_first=True)
             padded_labels = torch.cat(labels, dim=0)
 
-            return (padded_contexts, padded_targets, padded_labels)
+            contexts_lens = torch.tensor(contexts_lens, dtype=torch.long) # -> B
+            targets_lens = torch.tensor(targets_lens, dtype=torch.long) # -> B
+
+            return (padded_contexts, padded_targets, padded_labels, contexts_lens, targets_lens)
 
         return collate_fn
 
@@ -137,13 +146,15 @@ class Module(Base):
 
         return hid_sum
 
-    def forward(self, contexts, targets):
+    def forward(self, contexts, targets, contexts_lens, targets_lens):
         '''
         Takes in contexts and targets and returns the dot product of each enc(context) with each enc(target)
         '''
         ### INPUT ###
         # Contexts ->  B x N x 512 x 7 x 7 (N = Contexts Seq Len)
         # Targets -> B x T x 512 x 7 x 7 (T =  Targets Seq Len)
+        # Contexts_Lens -> B
+        # Targets_Lens -> B
 
         batch_size = contexts.shape[0]
         contexts_seq_len = contexts.shape[1]
@@ -157,8 +168,10 @@ class Module(Base):
         emb_contexts = self.vis_encoder(flat_contexts) # -> B * N x E
         # Reshaping:
         tall_contexts = emb_contexts.reshape(batch_size, contexts_seq_len, self.args.dframe) # -> B x N x E
+        # Packing:
+        packed_contexts = pack_padded_sequence(tall_contexts, contexts_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_contexts = self.encoder(tall_contexts, batch_size) # -> B x H (H = hidden dim of LSTM)
+        enc_contexts = self.encoder(packed_contexts, batch_size) # -> B x H (H = hidden dim of LSTM)
 
         ### TARGETS ###
         # Reshaping
@@ -167,8 +180,10 @@ class Module(Base):
         emb_targets = self.vis_encoder(flat_targets) # -> B * T x E
         # Reshaping:
         tall_targets = emb_targets.reshape(batch_size, targets_seq_len, self.args.dframe) # -> B x T x E
+        # Packing:
+        packed_targets = pack_padded_sequence(tall_targets, targets_lens, batch_first=True, enforce_sorted=False)
         #Encoding:
-        enc_targets = self.encoder(tall_targets, batch_size) # -> B x H
+        enc_targets = self.encoder(packed_targets, batch_size) # -> B x H
 
         ### COMB ###
         # Dot Product:
@@ -209,15 +224,17 @@ class Module(Base):
             print(len(train_loader))
             for batch in train_loader:
                 optimizer.zero_grad()
-                contexts, targets, labels = batch
+                contexts, targets, labels, contexts_lens, targets_lens = batch
 
                 # Transfer to GPU
                 contexts = contexts.to(self.device)
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
+                contexts_lens = contexts_lens.to(self.device)
+                targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits = self.forward(contexts, targets)
+                logits = self.forward(contexts, targets, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -243,15 +260,17 @@ class Module(Base):
             total_valid_size = torch.tensor(0, dtype=torch.float)
             with torch.no_grad():
                 for batch in valid_loader:
-                    contexts, targets, labels = batch
+                    contexts, targets, labels, contexts_lens, targets_lens = batch
 
                     # Transfer to GPU
                     contexts = contexts.to(self.device)
                     targets = targets.to(self.device)
                     labels = labels.to(self.device)
+                    contexts_lens = contexts_lens.to(self.device)
+                    targets_lens = targets_lens.to(self.device)
 
                     # Forward
-                    logits = self.forward(contexts, targets)
+                    logits = self.forward(contexts, targets, contexts_lens, targets_lens)
 
                     # Calculate Loss and Accuracy
                     loss = F.nll_loss(logits, labels)
@@ -267,6 +286,7 @@ class Module(Base):
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
 
+            self.writer.flush()
             # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
@@ -277,3 +297,4 @@ class Module(Base):
                     'vocab': self.vocab
                 }, fsave)
                 best_loss = total_valid_loss
+        self.writer.close()
