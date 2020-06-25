@@ -407,7 +407,7 @@ class Module(Base):
             else:
                 hstate_dropout_mask = torch.full_like(h, 1.0)
             self.r_state['state_t'] = h, c
-            self.rstate['hstate_dropout_mask'] = hstate_dropout_mask
+            self.r_state['hstate_dropout_mask'] = hstate_dropout_mask
             if self.controller_type == 'attention':
                 self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
             else:

@@ -78,7 +78,7 @@ class SubgoalChunker(BaseModule):
         self.tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
 
     def add_pred_layer(self):
-        if self.args.instruction_chunker_factored:
+        if vars(self.args).get('instruction_chunker_factored', False):
             self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.SUBMODULE_NAMES))
             self.segment_pred_layer = nn.Linear(self.args.dhid*2, 1)
             self.pad_pred_layer = nn.Linear(self.args.dhid*2, 1)
@@ -244,7 +244,7 @@ class SubgoalChunker(BaseModule):
             move_dict_to_cuda(feat)
 
         enc_lang = self.encode_lang(feat)
-        if self.args.instruction_chunker_factored:
+        if vars(self.args).get('instruction_chunker_factored', False):
             pad_scores = self.pad_pred_layer(enc_lang)
             inside_module_scores = self.chunk_pred_layer(enc_lang)
             begin_module_scores = self.segment_pred_layer(enc_lang) + inside_module_scores
