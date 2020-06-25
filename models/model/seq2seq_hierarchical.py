@@ -8,6 +8,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
+
+from models.utils.helper_utils import dropout_mask_like
 from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -105,6 +107,9 @@ class Module(Base):
             decoder = vnn.ConvFrameMaskDecoderModularIndependent
         else:
             decoder = vnn.ConvFrameMaskDecoderModular
+
+        assert not (args.hstate_dropout != 0 and args.variational_hstate_dropout != 0)
+
         self.dec = decoder(self.emb_action_low, args.dframe, 2*args.dhid,
                            pframe=args.pframe,
                            attn_dropout=args.attn_dropout,
@@ -331,7 +336,12 @@ class Module(Base):
         cont_lang, enc_lang = self.encode_lang(feat)
 
         # Each module will have its own cell, but all will share a hidden state. TODO should we only have one cell state too? 
-        state_0 = cont_lang[0], torch.zeros_like(cont_lang[0])
+        state_0 = h, c = cont_lang[0], torch.zeros_like(cont_lang[0])
+        if self.args.variational_hstate_dropout != 0.0 and self.training:
+            hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
+        else:
+            hstate_dropout_mask = torch.full_like(h, 1.0)
+
         if self.controller_type == 'attention':
             controller_state_0 = cont_lang[1], torch.zeros_like(cont_lang[1])
         else:
@@ -350,7 +360,7 @@ class Module(Base):
         res = self.dec(
             enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0,
             controller_state_0=controller_state_0, controller_mask=controller_mask,
-            transition_mask=transition_mask
+            transition_mask=transition_mask, hstate_dropout_mask=hstate_dropout_mask
         )
         feat.update(res)
         return feat
@@ -390,7 +400,14 @@ class Module(Base):
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
-            self.r_state['state_t'] = self.r_state['cont_lang'][0], torch.zeros_like(self.r_state['cont_lang'][0])
+
+            h, c = self.r_state['cont_lang'][0], torch.zeros_like(self.r_state['cont_lang'][0])
+            if self.args.variational_hstate_dropout != 0.0 and self.training:
+                hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
+            else:
+                hstate_dropout_mask = torch.full_like(h, 1.0)
+            self.r_state['state_t'] = h, c
+            self.rstate['hstate_dropout_mask'] = hstate_dropout_mask
             if self.controller_type == 'attention':
                 self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
             else:
@@ -424,7 +441,8 @@ class Module(Base):
         out_action_low, out_action_low_mask, state_t, controller_state_t, _, controller_attn_logits, out_controller_attn = self.dec.step(
             self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t,
             state_tm1=self.r_state['state_t'], controller_state_tm1=self.r_state['controller_state_t'],
-            controller_mask=self.r_state['subgoal']
+            controller_mask=self.r_state['subgoal'],
+            hstate_dropout_mask=self.r_state['hstate_dropout_mask'],
         )
         # out_controller_attn will always be a one-hot distribution. if self.r_state['subgoal'] = None, this will be
         # the argmax of the distribution predicted by the attention-based controller. Otherwise, it will equal to self.r_state['subgoal']

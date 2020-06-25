@@ -313,16 +313,27 @@ class ConvFrameMaskDecoderModular(nn.Module):
             self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
             self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
-    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
+    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+             transition_mask=None, next_transition_mask=None,
+             hstate_dropout_mask=None,
+             ):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
 
         if not self.modularize_actor_mask: 
-            return self.single_actor_mask_step(enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask)
-        else: 
-            return self.multiple_actor_mask_step(enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask)
+            return self.single_actor_mask_step(
+                enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask,
+                hstate_dropout_mask
+            )
+        else:
+            return self.multiple_actor_mask_step(
+                enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask,
+                hstate_dropout_mask
+            )
 
-    def multiple_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
+    def multiple_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+                                 transition_mask=None, next_transition_mask=None,
+                                 hstate_dropout_mask=None):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
         h_tm1 = state_tm1[0]
@@ -352,13 +363,17 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
             # update hidden state
             state_t = self.cell[i](inp_ti, (h_tm1, state_tm1[1]))
-            state_t = [self.hstate_dropout(x) for x in state_t]
+            h, c = [self.hstate_dropout(x) for x in state_t]
+            if hstate_dropout_mask is not None:
+                h = hstate_dropout_mask * h
+            state_t = h, c
+
             # batch x dhid
             h_t.append(state_t[0])
             c_t.append(state_t[1])
 
             # decode action and mask
-            cont_t = torch.cat([state_t[0], inp_ti], dim=-1)    
+            cont_t = torch.cat([state_t[0], inp_ti], dim=-1)
             action_emb_t = self.actor[i](self.actor_dropout(cont_t))
             action_t.append(action_emb_t.mm(self.emb.weight.t()))
             mask_t.append(self.mask_dec[i](cont_t))
@@ -416,9 +431,8 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
-
-
-    def single_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None, transition_mask=None, next_transition_mask=None):
+    def single_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+                               transition_mask=None, next_transition_mask=None, hstate_dropout_mask=None):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
         h_tm1 = state_tm1[0]
@@ -448,7 +462,11 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
             # update hidden state
             state_t = self.cell[i](inp_ti, (h_tm1, state_tm1[1]))
-            state_t = [self.hstate_dropout(x) for x in state_t]
+            h, c = [self.hstate_dropout(x) for x in state_t]
+            if hstate_dropout_mask is not None:
+                h = hstate_dropout_mask * h
+            state_t = h, c
+
             # batch x dhid
             h_t.append(state_t[0])
             c_t.append(state_t[1])
@@ -485,7 +503,6 @@ class ConvFrameMaskDecoderModular(nn.Module):
         else:
             module_attn = controller_mask.unsqueeze(-1).float()
 
-
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
         c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
         inp_t = module_attn[:,:-1,:].expand_as(inp_t).mul(inp_t).sum(1)
@@ -511,7 +528,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None, hstate_dropout_mask=None):
         # transition_mask is not used
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
@@ -536,7 +553,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
             else: 
                 controller_mask_in = controller_mask[:,t]
 
-            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in)
+            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(
+                enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in, hstate_dropout_mask=hstate_dropout_mask
+            )
             masks.append(mask_t)
             actions.append(action_t)
             attn_scores.append(attn_score_t)

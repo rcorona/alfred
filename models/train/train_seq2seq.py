@@ -75,6 +75,7 @@ def make_parser():
     parser.add_argument('--input_dropout', help='dropout rate for concatted input feats', default=0., type=float)
     parser.add_argument('--vis_dropout', help='dropout rate for Resnet feats', default=0.3, type=float)
     parser.add_argument('--hstate_dropout', help='dropout rate for LSTM hidden states during unrolling', default=0.3, type=float)
+    parser.add_argument('--variational_hstate_dropout', help='variational (same mask at each timestep, following Gal & Ghahramani 2016) dropout rate for LSTM hidden states during unrolling', default=0., type=float)
     parser.add_argument('--attn_dropout', help='dropout rate for attention', default=0., type=float)
     parser.add_argument('--actor_dropout', help='dropout rate for actor fc', default=0., type=float)
 

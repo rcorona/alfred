@@ -46,3 +46,13 @@ def print_git_info():
     # print the git revision and any changes, to make self-replication easier!
     subprocess.call("git rev-parse HEAD", shell=True)
     subprocess.call("git --no-pager diff", shell=True)
+
+def dropout_mask_like(tensor, dropout_p):
+    return torch.distributions.Bernoulli(
+        torch.full_like(tensor, 1.0 - dropout_p)
+    ).sample().float() / (1.0 - dropout_p)
+
+def dropout_mask(size, dropout_p):
+    return torch.distributions.Bernoulli(
+        torch.full(size, 1.0 - dropout_p)
+    ).sample().float() / (1.0 - dropout_p)
