@@ -138,7 +138,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None, hstate_dropout_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -158,6 +158,8 @@ class ConvFrameMaskDecoder(nn.Module):
         # update hidden state
         state_t = self.cell(inp_t, state_tm1)
         state_t = [self.hstate_dropout(x) for x in state_t]
+        if hstate_dropout_mask is not None:
+            state_t[0] = hstate_dropout_mask * state_t[0]
         h_t = state_t[0]
 
         # decode action and mask
@@ -168,7 +170,7 @@ class ConvFrameMaskDecoder(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None, hstate_dropout_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -180,12 +182,14 @@ class ConvFrameMaskDecoder(nn.Module):
         for t in range(max_t):
             try: 
                 action_t, mask_t, state_t, attn_score_t = self.step(
-                    enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+                    enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask,
+                    hstate_dropout_mask=hstate_dropout_mask
                 )
             except: 
                 #pdb.set_trace()
                 action_t, mask_t, state_t, attn_score_t = self.step(
-                    enc, frames[:, -1], e_t, state_t, encoder_mask=encoder_mask
+                    enc, frames[:, -1], e_t, state_t, encoder_mask=encoder_mask,
+                    hstate_dropout_mask=hstate_dropout_mask
                 )
 
             masks.append(mask_t)
@@ -615,7 +619,8 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None):
+    def step(self, enc, frame, e_t, state_tm1, encoder_mask=None,
+             hstate_dropout_mask=None):
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
 
@@ -635,6 +640,8 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
         # update hidden state
         state_t = self.cell(inp_t, state_tm1)
         state_t = [self.hstate_dropout(x) for x in state_t]
+        if hstate_dropout_mask is not None:
+            state_t[0] = hstate_dropout_mask * state_t[0]
         h_t, c_t = state_t[0], state_t[1]
 
         # decode action and mask
@@ -649,20 +656,21 @@ class ConvFrameMaskDecoderProgressMonitor(nn.Module):
 
         return action_t, mask_t, state_t, lang_attn_t, subgoal_t, progress_t
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, encoder_mask=None, hstate_dropout_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
         state_t = state_0
 
-        action = []
+        actions = []
         masks = []
         attn_scores = []
         subgoals = []
         progresses = []
         for t in range(max_t):
             action_t, mask_t, state_t, attn_score_t, subgoal_t, progress_t = self.step(
-                enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask
+                enc, frames[:, t], e_t, state_t, encoder_mask=encoder_mask,
+                hstate_dropout_mask=hstate_dropout_mask
             )
             masks.append(mask_t)
             actions.append(action_t)
@@ -715,7 +723,7 @@ class ConvFrameDecoder(nn.Module):
 
         nn.init.uniform_(self.go, -0.1, 0.1)
 
-    def step(self, enc, frame, e_t, state_tm1):
+    def step(self, enc, frame, e_t, state_tm1, hstate_dropout_mask=None):
         
         # previous decoder hidden state
         h_tm1 = state_tm1[0]
@@ -734,6 +742,8 @@ class ConvFrameDecoder(nn.Module):
         # update hidden state
         state_t = self.cell(inp_t, state_tm1)
         state_t = [self.hstate_dropout(x) for x in state_t]
+        if hstate_dropout_mask is not None:
+            state_t[0] = state_t[0] * hstate_dropout_mask
         h_t = state_t[0]
 
         # decode action and mask
@@ -743,7 +753,7 @@ class ConvFrameDecoder(nn.Module):
 
         return action_t, state_t, lang_attn_t
 
-    def forward(self, enc, frames, gold=None, max_decode=25, state_0=None):
+    def forward(self, enc, frames, gold=None, max_decode=25, state_0=None, hstate_dropout_mask=None):
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
@@ -752,7 +762,7 @@ class ConvFrameDecoder(nn.Module):
         actions = []
         attn_scores = []
         for t in range(max_t):
-            action_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t)
+            action_t, state_t, attn_score_t = self.step(enc, frames[:, t], e_t, state_t, hstate_dropout_mask=hstate_dropout_mask)
 
             actions.append(action_t)
             attn_scores.append(attn_score_t)

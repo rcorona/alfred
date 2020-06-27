@@ -8,6 +8,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
+
+from models.utils.helper_utils import dropout_mask_like
 from models.utils.metric import compute_f1, compute_exact, compute_edit_distance
 from gen.utils.image_util import decompress_mask
 import pdb
@@ -87,10 +89,15 @@ class Module(Base):
             move_dict_to_cuda(feat)
         cont_lang, enc_lang, enc_mask = self.encode_lang(feat)
 
-        state_0 = cont_lang, torch.zeros_like(cont_lang)
+        state_0 = h, c = cont_lang, torch.zeros_like(cont_lang)
+        if self.args.variational_hstate_dropout != 0.0 and self.training:
+            hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
+        else:
+            hstate_dropout_mask = torch.full_like(h, 1.0)
         frames = self.vis_dropout(feat['frames'])
         res = self.dec(
-            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, encoder_mask=enc_mask
+            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, encoder_mask=enc_mask,
+            hstate_dropout_mask=hstate_dropout_mask
         )
         feat.update(res)
         return feat
@@ -131,7 +138,13 @@ class Module(Base):
         # initialize embedding and hidden states
         if self.r_state['e_t'] is None and self.r_state['state_t'] is None:
             self.r_state['e_t'] = self.dec.go.repeat(self.r_state['enc_lang'].size(0), 1)
-            self.r_state['state_t'] = self.r_state['cont_lang'], torch.zeros_like(self.r_state['cont_lang'])
+            h, c = self.r_state['cont_lang'], torch.zeros_like(self.r_state['cont_lang'])
+            if self.args.variational_hstate_dropout != 0.0 and self.training:
+                hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
+            else:
+                hstate_dropout_mask = torch.full_like(h, 1.0)
+            self.r_state['state_t'] = h, c
+            self.r_state['hstate_dropout_mask'] = hstate_dropout_mask
 
         # previous action embedding
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
@@ -140,6 +153,7 @@ class Module(Base):
         out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(
             self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'],
             encoder_mask=self.r_state['enc_mask'],
+            hstate_dropout_mask=self.r_state['hstate_dropout_mask'],
         )
 
         # save states
