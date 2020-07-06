@@ -10,6 +10,7 @@ import torch
 import pprint
 import collections
 import numpy as np
+import tqdm
 import sklearn.metrics
 from vocab import Vocab
 from torch import nn
@@ -23,7 +24,7 @@ from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 from models.utils.helper_utils import plot_confusion_matrix
 from torch.utils.data import Dataset, DataLoader
-
+import time
 
 
 class AlfredBaselineDataset(Dataset):
@@ -48,6 +49,7 @@ class AlfredBaselineDataset(Dataset):
         lang_root = os.path.join(self.args.data, task_folder, task_file + ".json")
         img_root = os.path.join(self.args.data, task_folder, "imgs" + task_file[4:] + ".npz")
 
+
         with open(lang_root) as file:
             data = json.load(file)[task_num]
             img_file = np.load(img_root) # sizes of images are 7 x 7 x 3
@@ -55,13 +57,16 @@ class AlfredBaselineDataset(Dataset):
             img_file.close()
             #imgs = imgs[data['img_start']: data['img_end']]
 
+
+
         # Low levels and targets are image trajectories
-        low_level_context = [torch.tensor(img, dtype=torch.float).reshape(7*7*3) for img in imgs] # -> N x 147
+        final_shape = len(imgs[0]) * len(imgs[0][0]) * len(imgs[0][0][0])
+        low_level_context = [torch.tensor(img, dtype=torch.float).reshape(final_shape) for img in imgs] # -> N x 147
         target_idx = random.randrange(len(low_level_context))
         low_level_target = low_level_context[target_idx] # -> 1 x 147
         del low_level_context[target_idx]
         if len(low_level_context) == 0:
-            padded_context = torch.tensor([[self.pad for x in range(147)]], dtype=torch.float)
+            padded_context = torch.tensor([[self.pad for x in range(final_shape)]], dtype=torch.float)
         else:
             padded_context = torch.stack(low_level_context, dim=0) # -> N x 147
 
@@ -77,11 +82,13 @@ class AlfredBaselineDataset(Dataset):
 
     def __getitem__(self, idx):
 
+
         # Load task from dataset.
         task = self.data[idx]
 
         # Create dict of features from dict.
         feat = self.featurize(task)
+
 
         return feat
 
@@ -140,13 +147,14 @@ class Module(nn.Module):
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
 
+        self.img_shape =  147
 
         # self.classes = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End']
 
         # encoder and self-attention
         self.embed = nn.Embedding(len(self.vocab), args.demb)
-        self.linear = nn.Linear(args.demb, 147)
-        self.enc = nn.LSTM(147, args.dhid, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(args.demb, self.img_shape)
+        self.enc = nn.LSTM(self.img_shape, args.dhid, bidirectional=True, batch_first=True)
         self.to(self.device)
 
 
@@ -248,8 +256,9 @@ class Module(nn.Module):
             total_train_acc = torch.tensor(0, dtype=torch.float)
             total_train_size = torch.tensor(0, dtype=torch.float)
             print(len(train_loader))
-
-            for batch in train_loader:
+            desc_train = "Epoch " + str(epoch) + ", train"
+            desc_valid = "Epoch " + str(epoch) + ", valid"
+            for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
                 highs, contexts, targets, labels, highs_lens, contexts_lens = batch
 
@@ -260,10 +269,10 @@ class Module(nn.Module):
                 labels = labels.to(self.device)
                 highs_lens = highs_lens.to(self.device)
                 contexts_lens = contexts_lens.to(self.device)
-
-
                 # Forward
                 logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens)
+
+
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -276,6 +285,7 @@ class Module(nn.Module):
                 # Backpropogate
                 loss.backward()
                 optimizer.step()
+
 
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/train', (total_train_acc/total_train_size).item(), epoch)
@@ -293,7 +303,7 @@ class Module(nn.Module):
             # expected = []
 
             with torch.no_grad():
-                for batch in valid_loader:
+                for batch in tqdm.tqdm(valid_loader, desc = desc_valid):
                     highs, contexts, targets, labels, highs_lens, contexts_lens = batch
 
                     # Transfer to GPU
