@@ -27,12 +27,15 @@ if __name__ == '__main__':
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
     parser.add_argument('--model', help='model to use', default='cpv_multi_baseline_babyai')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
+    parser.add_argument('--pseudo', help='track more finely', action='store_true')
+    parser.add_argument('--workers', help='num workers', default=16, type=int)
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--resume', help='load a checkpoint')
 
     # hyper parameters
     parser.add_argument('--batch', help='batch size', default=512, type=int)
     parser.add_argument('--epoch', help='number of epochs', default=20, type=int)
+    parser.add_argument('--pseudo_epoch', help='number of pseudo_epochs', default=20, type=int)
     parser.add_argument('--lr', help='optimizer learning rate', default=1e-4, type=float)
     parser.add_argument('--decay_epoch', help='num epoch to adjust learning rate', default=10, type=int)
     parser.add_argument('--dhid', help='hidden layer size', default=512, type=int)
@@ -90,7 +93,7 @@ if __name__ == '__main__':
     # else:
     # load model
     M = import_module('models.model.{}'.format(args.model))
-    with open(os.path.join(args.data, "words2.vocab"), 'rb') as file:
+    with open(os.path.join(args.data, "words.vocab"), 'rb') as file:
         vocab = pickle.load(file)
     splits = {
         'train': os.path.join(args.data, "train_master.json"),

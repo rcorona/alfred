@@ -10,7 +10,6 @@ import torch
 import pprint
 import collections
 import numpy as np
-import tqdm
 import sklearn.metrics
 import matplotlib.pyplot as plt
 from vocab import Vocab
@@ -25,7 +24,7 @@ from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 from models.utils.helper_utils import plot_confusion_matrix
 from torch.utils.data import Dataset, DataLoader
-import time
+import tqdm
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -38,7 +37,13 @@ class AlfredBaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-        # self.goals = Vocab(['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End'])
+
+
+    def get_task_root(self, ex):
+        '''
+        returns the folder path of a trajectory
+        '''
+        return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
 
     def featurize(self, ex):
@@ -82,7 +87,6 @@ class AlfredBaselineDataset(Dataset):
 
         return (high_level, padded_context, padded_target, target_length)
 
-
     def __getitem__(self, idx):
         # Load task from dataset.
         task = self.data[idx]
@@ -95,6 +99,7 @@ class AlfredBaselineDataset(Dataset):
 
     def collate(self):
         def collate_fn(batch):
+
             batch_size = len(batch)
 
             highs = []
@@ -106,7 +111,18 @@ class AlfredBaselineDataset(Dataset):
             contexts_lens = []
             targets_lens = []
 
+            contexts_mask = []
+            targets_mask = []
+
             target_length = []
+
+            longest_seq_context = 0
+            for b in batch:
+                longest_seq_context = max(longest_seq_context, b[1].shape[0])
+
+            longest_seq_target = 0
+            for b in batch:
+                longest_seq_target = max(longest_seq_target, b[2].shape[0])
 
             for idx in range(batch_size):
                 highs.append(batch[idx][0])
@@ -116,13 +132,20 @@ class AlfredBaselineDataset(Dataset):
                 targets.append(batch[idx][2])
                 targets_lens.append(batch[idx][2].shape[0])
                 labels.append(torch.tensor(idx).unsqueeze(0))
+                c_m = torch.zeros(longest_seq_context)
+                c_m[:batch[idx][1].shape[0]] = torch.ones(batch[idx][1].shape[0])
+                contexts_mask.append(c_m)
+                t_m = torch.zeros(longest_seq_target)
+                t_m[:batch[idx][2].shape[0]] = torch.ones(batch[idx][2].shape[0])
+                targets_mask.append(t_m)
                 target_length.append(batch[idx][3])
-
 
             padded_highs = pad_sequence(highs, batch_first=True) # -> B x M (M = longest high seq)
             padded_contexts = pad_sequence(contexts, batch_first=True) # -> B x N x 147
-            padded_targets = pad_sequence(targets,  batch_first=True) # -> B x T x 147 (T = longest target seq)
+            padded_targets = pad_sequence(targets,  batch_first=True) # -> B x 147 (T = longest target seq)
             padded_labels = torch.cat(labels, dim=0)
+            contexts_mask = torch.stack(contexts_mask, dim=0)
+            targets_mask = torch.stack(targets_mask, dim=0)
 
             highs_lens = torch.tensor(highs_lens)
             contexts_lens = torch.tensor(contexts_lens)
@@ -130,15 +153,15 @@ class AlfredBaselineDataset(Dataset):
 
             target_length = torch.stack(target_length)
 
-            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, target_length)
+            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_mask, targets_mask, target_length)
 
         return collate_fn
 
-
 class Module(nn.Module):
     def __init__(self, args, vocab):
-        # super().__init__(args, vocab)
         super().__init__()
+
+
         self.pad = 0
         self.seg = 1
 
@@ -147,20 +170,18 @@ class Module(nn.Module):
         self.vocab = vocab
         self.pseudo = args.pseudo
 
-        self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-
-        self.img_shape =  147
-
-        # self.classes = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End']
+        self.img_shape = 147
 
         # encoder and self-attention
-        self.embed = nn.Embedding(len(self.vocab), args.demb)
+        self.embed = self.embed = nn.Embedding(len(self.vocab), args.demb)
         self.linear = nn.Linear(args.demb, self.img_shape)
         self.enc = nn.LSTM(self.img_shape, args.dhid, bidirectional=True, batch_first=True)
+
+        self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         self.to(self.device)
 
 
-    def encoder(self, batch, batch_size, h_0, c_0):
+    def encoder(self, batch, batch_size):
         '''
         Input: stacked tensor of [high_level, seq, low_level_context]
         '''
@@ -168,58 +189,74 @@ class Module(nn.Module):
         # Batch -> B x H x E
 
         ### LSTM ###
-        if h_0 is None or c_0 is None:
-            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
-            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
         out, (h, c) = self.enc(batch, (h_0, c_0)) # -> L * 2 x B x H
 
         ## COMB ##
         hid_sum = torch.sum(h, dim=0) # -> B x H
 
-        return hid_sum, h, c
+        return hid_sum
 
-    def forward(self, highs, contexts, targets, highs_lens, contexts_lens, targets_lens):
+    def forward(self, highs, contexts, targets, highs_lens, contexts_mask, targets_mask):
         '''
-        Takes in contexts and targets and returns the dot product of each enc(context) with each enc(target)
+        Takes in contexts and targets and returns the dot product of each enc(high) - enc(context) with each enc(target)
         '''
         ### INPUT ###
-        # Highs -> B x M (M = Highs Seq Len)
-        # Contexts ->  B x N x 147 (N = Contexts Seq Len)
-        # Targets -> B x 147 (T = Targets Seq Len)
+        # Highs ->  B x M (M = Highs Seq Len)
+        # Contexts -> B x N x 147 (N = Largest # of Low Levels)
+        # Targets -> B x 147
+        # Highs_Lens -> B
+        # Contexts_Lens -> B
+        # Targets_Lens -> B
+        # Mask -> B x N
 
         batch_size = contexts.shape[0]
+        highs_len = highs.shape[1]
+        contexts_len = contexts.shape[1]
+        targets_len = targets.shape[1]
 
-        ### HIGHS & CONTEXTS ###
+        ### HIGHS ###
         # Embedding:
-        emb_highs = self.embed(highs) # -> B x M x D
-        # Projection from lang embedding dimension to image embedding dimension:
-        tall_highs = self.linear(emb_highs) # -> B x M x E
+        highs = self.embed(highs) # -> B x M x D (D = embedding size)
+        # Projection:
+        highs = self.linear(highs) # -> B x M x 147
         # Packing:
-        packed_highs = pack_padded_sequence(tall_highs, highs_lens, batch_first=True, enforce_sorted=False)
+        highs = pack_padded_sequence(highs, highs_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        enc_highs, h_t, c_t = self.encoder(packed_highs, batch_size, None, None) # -> L * 2 x B x H
-        # Packing:
-        packed_contexts = pack_padded_sequence(contexts, contexts_lens, batch_first=True, enforce_sorted=False)
-        # Encoding:
-        enc_contexts, _, _ = self.encoder(packed_contexts, batch_size, h_t, c_t) # -> B x H
+        highs = self.encoder(highs, batch_size) # -> B x H
 
-        ## TARGETS ##
-        # Packing:
-        packed_targets = pack_padded_sequence(targets, targets_lens, batch_first=True, enforce_sorted=False)
+        ### CONTEXTS ###
         # Encoding:
-        enc_targets, _, _ = self.encoder(targets, batch_size, None, None) # -> B x H
+        contexts = self.encoder(contexts.reshape(batch_size * contexts_len, 1, -1), batch_size * contexts_len) # -> B x N x H
+        contexts = contexts.reshape(batch_size, contexts_len, -1)
+
+        contexts = torch.einsum('ijk, ij -> ijk', contexts, contexts_mask) # -> B x N x H
+        # Sum all low levels that correspond to the same high level:
+        contexts = torch.sum(contexts, dim=1)  # B x H
+
+        ### TARGETS ###
+        targets = self.encoder(targets.reshape(batch_size * targets_len, 1, -1), batch_size * targets_len) # -> B x N x H
+        targets = targets.reshape(batch_size, targets_len, -1)
+
+        targets = torch.einsum('ijk, ij -> ijk', targets, targets_mask) # -> B x N x H
+        # Sum all low levels that correspond to the same high level:
+        targets = torch.sum(targets, dim=1)  # B x H
 
         ### COMB ###
-        # Dot Product:
-        sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # -> B x B
+        # Combining high levels and low levels:
+        comb_contexts = highs - contexts # -> B x H
+        # Dot product:
+        sim_m = torch.matmul(comb_contexts, torch.transpose(targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
 
         return logits
 
     def run_train(self, splits, optimizer, args=None):
 
+        ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/babyai_new_baseline')
+        self.writer = SummaryWriter('runs/babyai_new_cpv')
         fsave = os.path.join(args.dout, 'best.pth')
 
         # Get splits
@@ -233,13 +270,14 @@ class Module(nn.Module):
         train_dataset = AlfredBaselineDataset(self.args, train_data)
 
         # Initialize Dataloaders
-        valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, num_workers=self.args.workers, collate_fn=valid_dataset.collate())
-        train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=self.args.workers, collate_fn=train_dataset.collate())
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=valid_dataset.collate())
+        train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=train_dataset.collate())
 
         # Optimizer
         optimizer = optimizer or torch.optim.Adam(list(self.parameters()), lr=args.lr)
 
-        # Training loop
+
+        ### TRAINING LOOP ###
         best_loss = 1e10
         if self.pseudo:
             print("Starting...")
@@ -247,6 +285,7 @@ class Module(nn.Module):
             pseudo_epoch_batches = len(train_dataset)//(args.pseudo_epoch * args.batch)
             print(pseudo_epoch_batches)
 
+        print(self.pseudo)
         for epoch in range(args.epoch):
             print('Epoch', epoch)
             desc_train = "Epoch " + str(epoch) + ", train"
@@ -267,7 +306,7 @@ class Module(nn.Module):
             self.train()
             for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
+                highs, contexts, targets, labels, highs_lens, contexts_mask, targets_mask, target_length = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -275,10 +314,11 @@ class Module(nn.Module):
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
                 highs_lens = highs_lens.to(self.device)
-                contexts_lens = contexts_lens.to(self.device)
-                targets_lens = targets_lens.to(self.device)
+                contexts_mask = contexts_mask.to(self.device)
+                targets_mask = targets_mask.to(self.device)
+
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits = self.forward(highs, contexts, targets, highs_lens, contexts_mask, targets_mask)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -303,6 +343,7 @@ class Module(nn.Module):
                 # Backpropogate
                 loss.backward()
                 optimizer.step()
+                torch.cuda.empty_cache()
 
                 if self.pseudo and batch_idx == pseudo_epoch_batches:
                     # Write to TensorBoardX
@@ -321,7 +362,6 @@ class Module(nn.Module):
                     b = []
                     for idx in sorted(accuracy_by_length.keys()):
                         a.append(idx)
-
                         b.append(accuracy_by_length[idx]/num_by_length[idx])
                     fig = plt.figure()
                     plt.plot(a, b)
@@ -330,6 +370,9 @@ class Module(nn.Module):
 
                     accuracy_by_length = {}
                     num_by_length = {}
+
+                    self.train()
+
                 batch_idx += 1
 
             # Write to TensorBoardX
@@ -341,6 +384,7 @@ class Module(nn.Module):
             total_valid_loss = self.run_valid(valid_loader, epoch, pseudo=False, desc_valid=desc_valid)
 
             self.writer.flush()
+
             # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
@@ -353,7 +397,6 @@ class Module(nn.Module):
                 best_loss = total_valid_loss
 
         self.writer.close()
-
     def run_valid(self, valid_loader, epoch, pseudo=True, desc_valid=None):
 
         self.eval()
@@ -363,13 +406,12 @@ class Module(nn.Module):
 
         if pseudo:
             loader = valid_loader
-
         else:
             loader = tqdm.tqdm(valid_loader, desc = desc_valid)
 
         with torch.no_grad():
             for batch in loader:
-                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
+                highs, contexts, targets, labels, highs_lens, contexts_mask, targets_mask, target_length = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -377,11 +419,11 @@ class Module(nn.Module):
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
                 highs_lens = highs_lens.to(self.device)
-                contexts_lens = contexts_lens.to(self.device)
-                targets_lens = targets_lens.to(self.device)
+                contexts_mask = contexts_mask.to(self.device)
+                targets_mask = targets_mask.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits = self.forward(highs, contexts, targets, highs_lens, contexts_mask, targets_mask)
 
                 # Calculate Loss and Accuracy
                 loss = F.nll_loss(logits, labels)
@@ -390,9 +432,6 @@ class Module(nn.Module):
                 most_likely = torch.argmax(logits, dim=1)
                 acc = torch.eq(most_likely, labels)
                 total_valid_acc += torch.sum(acc)
-
-
-
         if not pseudo:
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
