@@ -40,8 +40,13 @@ class Eval(object):
         self.model.args.data = self.args.data if self.args.data else self.model.args.data
 
         if self.args.hierarchical_controller_chunker_model_path:
-            from models.model.instruction_chunker_subgoal import SubgoalChunker
-            self.chunker_model, optimizer = SubgoalChunker.load(self.args.hierarchical_controller_chunker_model_path)
+            from models.model.instruction_chunker_subgoal import SubgoalChunker, SubgoalChunkerSelfTransitions, SubgoalChunkerNoTransitions
+            ChunkerModule = {
+                'instruction_chunker_subgoal': SubgoalChunker,
+                'instruction_chunker_subgoal_self_transitions': SubgoalChunkerSelfTransitions,
+                'instruction_chunker_subgoal_no_transitions': SubgoalChunkerNoTransitions,
+            }[self.args.hierarchical_controller_chunker_model_type]
+            self.chunker_model, optimizer = ChunkerModule.load(self.args.hierarchical_controller_chunker_model_path)
             self.chunker_model.share_memory()
             self.chunker_model.eval()
 

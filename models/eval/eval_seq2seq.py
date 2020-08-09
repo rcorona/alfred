@@ -38,7 +38,9 @@ if __name__ == '__main__':
     parser.add_argument('--indep-modules', help='uses independent submodules that keep their own hidden state', action='store_true')
     parser.add_argument('--hierarchical_controller', choices=['attention', 'chunker'], default='attention')
     parser.add_argument('--hierarchical_controller_chunker_model_path', help='path to the chunker model (for use with --hierarchical_controller=chunker)')
-
+    parser.add_argument('--hierarchical_controller_chunker_model_type', choices=[
+        'instruction_chunker_subgoal', 'instruction_chunker_subgoal_self_transitions', 'instruction_chunker_subgoal_no_transitions'
+    ], default='instruction_chunker_subgoal')
 
     parser.add_argument('--instance_limit', type=int)
 
