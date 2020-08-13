@@ -10,6 +10,8 @@ import torch
 import pprint
 import collections
 import numpy as np
+import sklearn.metrics
+from vocab import Vocab
 from torch import nn
 from tensorboardX import SummaryWriter
 from tqdm import trange
@@ -19,6 +21,7 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
+from models.utils.helper_utils import plot_confusion_matrix
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -31,6 +34,7 @@ class AlfredBaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
+        self.goals = Vocab(['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End'])
 
 
     def get_task_root(self, ex):
@@ -62,7 +66,12 @@ class AlfredBaselineDataset(Dataset):
         del low_level_context[target_idx]
 
         padded_context = torch.cat(low_level_context, dim=0) # -> N x 512 x 7 x 7
-        return (high_level, padded_context, low_level_target)
+
+        # Categorize the correct target for error analysis
+        category = self.goals.word2index(ex['plan']['high_pddl'][target_idx]['planner_action']['action'])
+
+        return (high_level, padded_context, low_level_target, category)
+
 
     def __getitem__(self, idx):
 
@@ -113,7 +122,9 @@ class AlfredBaselineDataset(Dataset):
             contexts_lens = torch.tensor(contexts_lens)
             targets_lens = torch.tensor(targets_lens)
 
-            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens)
+            categories = [batch[idx][3] for idx in range(batch_size)]
+
+            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, categories)
 
         return collate_fn
 
@@ -129,6 +140,8 @@ class Module(Base):
         # args and vocab
         self.args = args
         self.vocab = vocab
+
+        self.classes = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End']
 
         # encoder and self-attention
         self.embed = nn.Embedding(len(self.vocab['word']), args.demb)
@@ -240,7 +253,7 @@ class Module(Base):
 
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, categories = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -276,9 +289,14 @@ class Module(Base):
             total_valid_loss = torch.tensor(0, dtype=torch.float)
             total_valid_acc = torch.tensor(0, dtype=torch.float)
             total_valid_size = torch.tensor(0, dtype=torch.float)
+
+            # Will contain pairs of (predicted category, actual category) for analysis
+            predicted = []
+            expected = []
+
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens = batch
+                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, categories = batch
 
                     # Transfer to GPU
                     highs = highs.to(self.device)
@@ -300,11 +318,20 @@ class Module(Base):
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
 
+                    # Enter results
+                    predicted.extend([categories[torch.argmax(logits, dim=1)[i]] for i in range(logits.shape[0])])
+                    expected.extend(categories)
+
                 # Write to TensorBoardX
                 self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
                 self.writer.add_scalar('Loss/validation', total_valid_loss.item(), epoch)
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
+
+                cm = sklearn.metrics.confusion_matrix(expected, predicted)
+                figure = plot_confusion_matrix(cm, class_names=self.classes)
+
+                self.writer.add_figure("Confusion Matrix", figure, global_step=epoch)
 
             self.writer.flush()
             # Save Model iff validation loss is improved

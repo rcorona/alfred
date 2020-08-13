@@ -10,6 +10,8 @@ import torch
 import pprint
 import collections
 import numpy as np
+import sklearn.metrics
+from vocab import Vocab
 from torch import nn
 from tensorboardX import SummaryWriter
 from tqdm import trange
@@ -19,6 +21,7 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
+from models.utils.helper_utils import plot_confusion_matrix
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -31,6 +34,7 @@ class AlfredBaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
+        self.goals = Vocab(['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End'])
 
 
     def get_task_root(self, ex):
@@ -61,8 +65,11 @@ class AlfredBaselineDataset(Dataset):
         low_level_target = low_level_context[target_idx]
         del low_level_context[target_idx]
 
+        # Categorize the correct target for error analysis
+        category = self.goals.word2index(ex['plan']['high_pddl'][target_idx]['planner_action']['action'])
+
         padded_context = torch.cat([high_level] + [torch.tensor(self.seg, dtype = torch.float).repeat(1, 512, 7, 7)] + low_level_context, dim=0)
-        return (padded_context, low_level_target)
+        return (padded_context, low_level_target, category)
 
     def __getitem__(self, idx):
 
@@ -88,6 +95,7 @@ class AlfredBaselineDataset(Dataset):
             contexts = []
             targets = []
             labels = []
+            categories = []
 
             contexts_lens = []
             targets_lens = []
@@ -98,6 +106,7 @@ class AlfredBaselineDataset(Dataset):
                 targets.append(batch[idx][1])
                 targets_lens.append(batch[idx][1].shape[0])
                 labels.append(torch.tensor(idx).unsqueeze(0))
+                categories.append(batch[idx][2])
 
             padded_contexts = pad_sequence(contexts, batch_first=True)
             padded_targets = pad_sequence(targets,  batch_first=True)
@@ -106,7 +115,7 @@ class AlfredBaselineDataset(Dataset):
             contexts_lens = torch.tensor(contexts_lens, dtype=torch.long) # -> B
             targets_lens = torch.tensor(targets_lens, dtype=torch.long) # -> B
 
-            return (padded_contexts, padded_targets, padded_labels, contexts_lens, targets_lens)
+            return (padded_contexts, padded_targets, padded_labels, contexts_lens, targets_lens, categories)
 
         return collate_fn
 
@@ -122,6 +131,7 @@ class Module(Base):
         # args and vocab
         self.args = args
         self.vocab = vocab
+        self.classes = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End']
 
         # encoder and self-attention
         self.vis_encoder = vnn.ResnetVisualEncoder(dframe=self.args.dframe)
@@ -224,7 +234,7 @@ class Module(Base):
             print(len(train_loader))
             for batch in train_loader:
                 optimizer.zero_grad()
-                contexts, targets, labels, contexts_lens, targets_lens = batch
+                contexts, targets, labels, contexts_lens, targets_lens, categories = batch
 
                 # Transfer to GPU
                 contexts = contexts.to(self.device)
@@ -258,9 +268,14 @@ class Module(Base):
             total_valid_loss = torch.tensor(0, dtype=torch.float)
             total_valid_acc = torch.tensor(0, dtype=torch.float)
             total_valid_size = torch.tensor(0, dtype=torch.float)
+
+            # Will contain pairs of (predicted category, actual category) for analysis
+            predicted = []
+            expected = []
+
             with torch.no_grad():
                 for batch in valid_loader:
-                    contexts, targets, labels, contexts_lens, targets_lens = batch
+                    contexts, targets, labels, contexts_lens, targets_lens, categories = batch
 
                     # Transfer to GPU
                     contexts = contexts.to(self.device)
@@ -280,13 +295,24 @@ class Module(Base):
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
 
+                    # Enter results
+                    predicted.extend([categories[torch.argmax(logits, dim=1)[i]] for i in range(logits.shape[0])])
+                    expected.extend(categories)
+
+
                 # Write to TensorBoardX
                 self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
                 self.writer.add_scalar('Loss/validation', total_valid_loss.item(), epoch)
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
 
-            self.writer.flush()
+                cm = sklearn.metrics.confusion_matrix(expected, predicted)
+                figure = plot_confusion_matrix(cm, class_names=self.classes)
+
+                self.writer.add_figure("Confusion Matrix", figure, global_step=epoch)
+
+
+            # self.run_eval(eval_dataset, epoch)
             # Save Model iff validation loss is improved
             if total_valid_loss < best_loss:
                 print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
@@ -297,4 +323,59 @@ class Module(Base):
                     'vocab': self.vocab
                 }, fsave)
                 best_loss = total_valid_loss
+
+            self.writer.flush()
+
         self.writer.close()
+
+
+    # def run_eval(self, eval_dataset, epoch):
+    #     # Initalize Dataloaders
+    #     eval_loader = DataLoader(eval_dataset, batch_size=self.args.batch, shuffle=True, num_workers=8, collate_fn=eval_dataset.collate())
+    #
+    #     # Will contain pairs of (predicted category, actual category) for analysis
+    #     predicted = []
+    #     expected = []
+    #
+    #     self.eval()
+    #     total_eval_loss = torch.tensor(0, dtype=torch.float)
+    #     total_eval_acc = torch.tensor(0, dtype=torch.float)
+    #     total_eval_size = torch.tensor(0, dtype=torch.float)
+    #
+    #     with torch.no_grad():
+    #         for batch in eval_loader:
+    #             contexts, targets, labels, contexts_lens, targets_lens, categories = batch
+    #
+    #             # Transfer to GPU
+    #             contexts = contexts.to(self.device)
+    #             targets = targets.to(self.device)
+    #             labels = labels.to(self.device)
+    #             contexts_lens = contexts_lens.to(self.device)
+    #             targets_lens = targets_lens.to(self.device)
+    #
+    #             # Forward
+    #             logits = self.forward(contexts, targets, contexts_lens, targets_lens)
+    #
+    #             # Calculate Loss and Accuracy
+    #             loss = F.nll_loss(logits, labels)
+    #             total_eval_loss += loss
+    #             total_eval_size += labels.shape[0]
+    #             most_likely = torch.argmax(logits, dim=1)
+    #             acc = torch.eq(most_likely, labels)
+    #             total_eval_acc += torch.sum(acc)
+    #
+    #             # Enter results
+    #             predicted.extend([categories[torch.argmax(logits, dim=1)[i]] for i in range(logits.shape[0])])
+    #             expected.extend(categories)
+    #
+    #
+    #     # Write to TensorBoardX
+    #     self.writer.add_scalar('Accuracy/evaluation', (total_eval_acc/total_eval_size).item(), epoch)
+    #     self.writer.add_scalar('Loss/evaluation', total_eval_loss.item(), epoch)
+    #     print("Evaluation Accuracy: " + str((total_eval_acc/total_eval_size).item()))
+    #     print("Evaluation Loss: " + str(total_eval_loss.item()))
+    #
+    #     cm = sklearn.metrics.confusion_matrix(expected, predicted)
+    #     figure = plot_confusion_matrix(cm, class_names=self.classes)
+    #
+    #     self.writer.add_figure("Confusion Matrix", figure, global_step=epoch)

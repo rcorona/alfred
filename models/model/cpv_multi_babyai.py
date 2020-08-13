@@ -2,8 +2,6 @@ import os
 import torch
 import numpy as np
 import nn.vnn as vnn
-import collections
-import os
 import random
 import json
 import torch
@@ -19,7 +17,6 @@ from tqdm import trange
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
-from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
 from models.utils.helper_utils import plot_confusion_matrix
@@ -249,6 +246,8 @@ class Module(nn.Module):
         # Dot product:
         sim_m = torch.matmul(comb_contexts, torch.transpose(targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
+        # How far along are we
+        done = torch.matmul(highs.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1))
 
         return logits
 

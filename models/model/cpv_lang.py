@@ -10,6 +10,8 @@ import torch
 import pprint
 import collections
 import numpy as np
+import sklearn.metrics
+from vocab import Vocab
 from torch import nn
 from tensorboardX import SummaryWriter
 from tqdm import trange
@@ -19,8 +21,8 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from model.seq2seq import Module as Base
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
+from models.utils.helper_utils import plot_confusion_matrix
 from torch.utils.data import Dataset, DataLoader
-
 
 
 class AlfredBaselineDataset(Dataset):
@@ -31,7 +33,7 @@ class AlfredBaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
-
+        self.goals = Vocab(['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End'])
 
 
     def featurize(self, ex):
@@ -39,23 +41,42 @@ class AlfredBaselineDataset(Dataset):
         tensorize and pad batch input
         '''
 
-        # Collect instructions from dictionary
-        high_level = torch.tensor(ex["high_level"])
-        low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]]
+        # # Collect instructions from dictionary
+        # high_level = torch.tensor(ex["high_level"])
+        # low_level_context = [torch.tensor(ll) for ll in ex["low_level_context"]]
+        #
+        # # Remove target from low levels
+        # target_idx = random.randrange(len(low_level_context))
+        # low_level_target = low_level_context[target_idx]
+        # del low_level_context[target_idx]
+        # return (high_level, low_level_context, low_level_target)
 
-        # Remove target from low levels
+        high_level = torch.tensor(ex['num']['lang_goal']).type(torch.long) # -> M
+        low_level_context = [torch.tensor(ex['num']['lang_instr'][idx]) for idx in range(len(ex['ann']['instr']))]
         target_idx = random.randrange(len(low_level_context))
-        low_level_target = low_level_context[target_idx]
+        low_level_target = torch.tensor(ex['num']['lang_instr'][target_idx]) # -> T
         del low_level_context[target_idx]
 
-        return (high_level, low_level_context, low_level_target)
+        padded_context = torch.cat([high_level] + [torch.tensor(self.seg).unsqueeze(0)] + low_level_context, dim=0) # -> N x 512 x 7 x 7
+
+        # Categorize the correct target for error analysis
+        category = self.goals.word2index(ex['plan']['high_pddl'][target_idx]['planner_action']['action'])
+
+        return (high_level, low_level_context, low_level_target, category)
+
+
 
     def __getitem__(self, idx):
 
         # Load task from dataset.
         task = self.data[idx]
+
+        json_path = os.path.join(self.args.data, task['task'], '%s' % self.args.pp_folder, 'ann_%d.json' % task['repeat_idx'])
+        with open(json_path) as f:
+            data = json.load(f)
+
         # Create dict of features from dict.
-        feat = self.featurize(task)
+        feat = self.featurize(data)
 
         return feat
 
@@ -119,7 +140,9 @@ class AlfredBaselineDataset(Dataset):
             for idx in range(batch_size):
                 mask[idx, :contexts_nums[idx]] = torch.ones((contexts_nums[idx],))
 
-            return (padded_highs, packed_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, mask)
+            categories = [batch[idx][3] for idx in range(batch_size)]
+
+            return (padded_highs, packed_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, mask, categories)
         return collate_fn
 
 
@@ -135,6 +158,7 @@ class Module(Base):
         # args and vocab
         self.args = args
         self.vocab = vocab
+        self.classes = ['GotoLocation', 'PickupObject', 'PutObject', 'CoolObject', 'HeatObject', 'CleanObject', 'SliceObject', 'ToggleObject', 'End']
 
         # encoder and self-attention
         self.embed = nn.Embedding(len(self.vocab['word']), args.demb)
@@ -223,15 +247,22 @@ class Module(Base):
         self.writer = SummaryWriter('runs/lang_cpv')
         fsave = os.path.join(args.dout, 'best.pth')
 
-        # Get splits
-        splits = self.load_data_into_ram()
-        valid_idx = np.arange(start=0, stop=len(splits), step=10)
-        eval_idx = np.arange(start=1, stop=len(splits), step=10)
-        train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
+        # # Get splits
+        # splits = self.load_data_into_ram()
+        # valid_idx = np.arange(start=0, stop=len(splits), step=10)
+        # eval_idx = np.arange(start=1, stop=len(splits), step=10)
+        # train_idx = [i for i in range(len(splits)) if i not in valid_idx and i not in eval_idx]
+        #
+        # # Initialize Datasets
+        # valid_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in valid_idx])
+        # train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
+
+        train_data = splits['train']
+        valid_data = splits['valid_seen'] + splits['valid_unseen']
 
         # Initialize Datasets
-        valid_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in valid_idx])
-        train_dataset = AlfredBaselineDataset(args, [splits[i] for i in range(len(splits)) if i in train_idx])
+        valid_dataset = AlfredBaselineDataset(self.args, valid_data)
+        train_dataset = AlfredBaselineDataset(self.args, train_data)
 
         # Initalize Dataloaders
         valid_loader = DataLoader(valid_dataset, batch_size=self.args.batch, shuffle=True, num_workers=8, collate_fn=valid_dataset.collate())
@@ -250,7 +281,7 @@ class Module(Base):
             total_train_size = torch.tensor(0, dtype=torch.float)
             for batch in train_loader:
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask, categories = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -287,9 +318,14 @@ class Module(Base):
             total_valid_loss = torch.tensor(0, dtype=torch.float)
             total_valid_acc = torch.tensor(0, dtype=torch.float)
             total_valid_size = torch.tensor(0, dtype=torch.float)
+
+            # Will contain pairs of (predicted category, actual category) for analysis
+            predicted = []
+            expected = []
+
             with torch.no_grad():
                 for batch in valid_loader:
-                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask = batch
+                    highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, mask, categories = batch
 
                     # Transfer to GPU
                     highs = highs.to(self.device)
@@ -312,11 +348,20 @@ class Module(Base):
                     acc = torch.eq(most_likely, labels)
                     total_valid_acc += torch.sum(acc)
 
+                    # Enter results
+                    predicted.extend([categories[torch.argmax(logits, dim=1)[i]] for i in range(logits.shape[0])])
+                    expected.extend(categories)
+
                 # Write to TensorBoardX
                 self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
                 self.writer.add_scalar('Loss/validation', total_valid_loss.item(), epoch)
                 print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
                 print("Validation Loss: " + str(total_valid_loss.item()))
+
+                cm = sklearn.metrics.confusion_matrix(expected, predicted)
+                figure = plot_confusion_matrix(cm, class_names=self.classes)
+
+                self.writer.add_figure("Confusion Matrix", figure, global_step=epoch)
 
             self.writer.flush()
             # Save Model iff validation loss is improved
