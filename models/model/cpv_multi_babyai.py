@@ -150,7 +150,7 @@ class AlfredBaselineDataset(Dataset):
 
             target_length = torch.stack(target_length)
 
-            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_mask, targets_mask, target_length)
+            return (padded_highs, padded_contexts, padded_targets, padded_labels, highs_lens, contexts_lens, targets_lens, target_length)
 
         return collate_fn
 
@@ -178,7 +178,7 @@ class Module(nn.Module):
         self.to(self.device)
 
 
-    def encoder(self, batch, batch_size):
+    def encoder(self, batch, batch_size, h_0=None, c_0=None):
         '''
         Input: stacked tensor of [high_level, seq, low_level_context]
         '''
@@ -186,16 +186,17 @@ class Module(nn.Module):
         # Batch -> B x H x E
 
         ### LSTM ###
-        h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
-        c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
         out, (h, c) = self.enc(batch, (h_0, c_0)) # -> L * 2 x B x H
 
         ## COMB ##
         hid_sum = torch.sum(h, dim=0) # -> B x H
 
-        return hid_sum
+        return hid_sum, h, c
 
-    def forward(self, highs, contexts, targets, highs_lens, contexts_mask, targets_mask):
+    def forward(self, highs, contexts, targets, highs_lens, contexts_lens, targets_lens):
         '''
         Takes in contexts and targets and returns the dot product of each enc(high) - enc(context) with each enc(target)
         '''
@@ -209,9 +210,6 @@ class Module(nn.Module):
         # Mask -> B x N
 
         batch_size = contexts.shape[0]
-        highs_len = highs.shape[1]
-        contexts_len = contexts.shape[1]
-        targets_len = targets.shape[1]
 
         ### HIGHS ###
         # Embedding:
@@ -221,24 +219,19 @@ class Module(nn.Module):
         # Packing:
         highs = pack_padded_sequence(highs, highs_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
-        highs = self.encoder(highs, batch_size) # -> B x H
+        highs, _, _ = self.encoder(highs, batch_size) # -> B x H
 
         ### CONTEXTS ###
         # Encoding:
-        contexts = self.encoder(contexts.reshape(batch_size * contexts_len, 1, -1), batch_size * contexts_len) # -> B x N x H
-        contexts = contexts.reshape(batch_size, contexts_len, -1)
-
-        contexts = torch.einsum('ijk, ij -> ijk', contexts, contexts_mask) # -> B x N x H
-        # Sum all low levels that correspond to the same high level:
-        contexts = torch.sum(contexts, dim=1)  # B x H
+        contexts = pack_padded_sequence(contexts, contexts_lens, batch_first=True, enforce_sorted=False)
+        contexts, h, c = self.encoder(contexts, batch_size) # -> B x H
 
         ### TARGETS ###
-        targets = self.encoder(targets.reshape(batch_size * targets_len, 1, -1), batch_size * targets_len) # -> B x N x H
-        targets = targets.reshape(batch_size, targets_len, -1)
+        p_targets = pack_padded_sequence(targets, targets_lens, batch_first=True, enforce_sorted=False)
+        targets, _, _ = self.encoder(p_targets, batch_size) # -> B x H
 
-        targets = torch.einsum('ijk, ij -> ijk', targets, targets_mask) # -> B x N x H
-        # Sum all low levels that correspond to the same high level:
-        targets = torch.sum(targets, dim=1)  # B x H
+        ## FULL TRAJ ##
+        traj, _, _ = self.encoder(p_targets, batch_size, h_0=h, c_0=c)
 
         ### COMB ###
         # Combining high levels and low levels:
@@ -247,15 +240,22 @@ class Module(nn.Module):
         sim_m = torch.matmul(comb_contexts, torch.transpose(targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
         # How far along are we
-        done = torch.matmul(highs.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1))
+        hdotc = torch.bmm(highs.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1)).squeeze()
+        hdott = torch.bmm(highs.reshape(batch_size, 1, -1), targets.reshape(batch_size, -1, 1)).squeeze()
+        hnorm = torch.bmm(highs.reshape(batch_size, 1, -1), highs.reshape(batch_size, -1, 1)).squeeze()
+        cnorm = torch.bmm(contexts.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1)).squeeze()
+        tnorm = torch.bmm(targets.reshape(batch_size, 1, -1), targets.reshape(batch_size, -1, 1)).squeeze()
 
-        return logits
+        highdottraj = torch.bmm(highs.reshape(batch_size, 1, -1), traj.reshape(batch_size, -1, 1)).squeeze()
+
+        return logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj
 
     def run_train(self, splits, optimizer, args=None):
+        print("Starting...")
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/babyai_new_cpv')
+        self.writer = SummaryWriter('runs/babyai_cpv_weighted')
         fsave = os.path.join(args.dout, 'best.pth')
 
         # Get splits
@@ -291,11 +291,26 @@ class Module(nn.Module):
             desc_valid = "Epoch " + str(epoch) + ", valid"
 
             total_train_loss = torch.tensor(0, dtype=torch.float)
+            total_class_loss = torch.tensor(0, dtype=torch.float)
+            total_sum_loss = torch.tensor(0, dtype=torch.float)
+            total_equal_loss = torch.tensor(0, dtype=torch.float)
+            total_hnorm_loss = torch.tensor(0, dtype=torch.float)
+            total_cnorm_loss = torch.tensor(0, dtype=torch.float)
+            total_tnorm_loss = torch.tensor(0, dtype=torch.float)
+            total_max_dot_loss = torch.tensor(0, dtype=torch.float)
+
             total_train_acc = torch.tensor(0, dtype=torch.float)
             total_train_size = torch.tensor(0, dtype=torch.float)
 
             if self.pseudo:
                 pseudo_train_size = torch.tensor(0, dtype=torch.float)
+                pseudo_class_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_sum_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_equal_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_hnorm_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_cnorm_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_tnorm_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_max_dot_loss = torch.tensor(0, dtype=torch.float)
                 pseudo_train_acc = torch.tensor(0, dtype=torch.float)
                 pseudo_train_loss = torch.tensor(0, dtype=torch.float)
                 batch_idx = 0
@@ -305,7 +320,7 @@ class Module(nn.Module):
             self.train()
             for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
-                highs, contexts, targets, labels, highs_lens, contexts_mask, targets_mask, target_length = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -313,18 +328,42 @@ class Module(nn.Module):
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
                 highs_lens = highs_lens.to(self.device)
-                contexts_mask = contexts_mask.to(self.device)
-                targets_mask = targets_mask.to(self.device)
+                contexts_lens = contexts_lens.to(self.device)
+                targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_mask, targets_mask)
+                logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                loss = F.nll_loss(logits, labels)
+                classification_loss = F.nll_loss(logits, labels) * args.lbda
+                sum_loss = F.mse_loss(hdotc, hnorm - hdott) * args.lbda
+                equal_loss = F.mse_loss(hnorm, highdottraj)
+                hnorm_loss = sum([hnorm[i] if hnorm[i].item() > torch.tensor(1.) else 0 for i in range(hnorm.shape[0])]) * args.lbda
+                cnorm_loss = sum([cnorm[i] if cnorm[i].item() > torch.tensor(1.) else 0 for i in range(cnorm.shape[0])]) * args.lbda
+                tnorm_loss = sum([tnorm[i] if tnorm[i].item() > torch.tensor(1.) else 0 for i in range(tnorm.shape[0])]) * args.lbda
+                max_dot_loss = -highdottraj.sum()
+                loss = classification_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
                 total_train_loss += loss
+                total_class_loss += classification_loss
+                total_sum_loss += sum_loss
+                total_equal_loss += equal_loss
+                total_hnorm_loss += hnorm_loss
+                total_cnorm_loss += cnorm_loss
+                total_tnorm_loss += tnorm_loss
+                total_max_dot_loss += max_dot_loss
                 pseudo_train_loss += loss
+                pseudo_class_loss += classification_loss
+                pseudo_sum_loss += sum_loss
+                pseudo_equal_loss += equal_loss
+                pseudo_hnorm_loss += hnorm_loss
+                pseudo_cnorm_loss += cnorm_loss
+                pseudo_tnorm_loss += tnorm_loss
+                pseudo_max_dot_loss += max_dot_loss
+
                 total_train_size += labels.shape[0]
                 pseudo_train_size += labels.shape[0]
+
+
                 most_likely = torch.argmax(logits, dim=1)
                 acc = torch.eq(most_likely, labels)
                 total_train_acc += torch.sum(acc)
@@ -348,12 +387,26 @@ class Module(nn.Module):
                     # Write to TensorBoardX
                     self.writer.add_scalar('PseudoAccuracy/train', (pseudo_train_acc/pseudo_train_size).item(), pseudo_epoch)
                     self.writer.add_scalar('PseudoLoss/train', (pseudo_train_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoClassificationLoss/train', (pseudo_class_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoSumLoss/train', (pseudo_sum_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoEqualLoss/train', (pseudo_equal_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoHNormLoss/train', (pseudo_hnorm_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoCNormLoss/train', (pseudo_cnorm_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoTNormLoss/train', (pseudo_tnorm_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoMaxDotLoss/train', (pseudo_max_dot_loss/pseudo_train_size).item(), pseudo_epoch)
 
                     self.run_valid(valid_loader, pseudo_epoch)
 
                     pseudo_epoch += 1
                     batch_idx = -1
                     pseudo_train_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_class_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_sum_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_equal_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_hnorm_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_cnorm_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_tnorm_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_max_dot_loss = torch.tensor(0, dtype=torch.float)
                     pseudo_train_acc = torch.tensor(0, dtype=torch.float)
                     pseudo_train_size = torch.tensor(0, dtype=torch.float)
 
@@ -377,8 +430,17 @@ class Module(nn.Module):
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/train', (total_train_acc/total_train_size).item(), epoch)
             self.writer.add_scalar('Loss/train', (total_train_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('ClassificationLoss/train', (total_class_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('SumLoss/train', (total_sum_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('EqualLoss/train', (total_equal_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('HNormLoss/train', (total_hnorm_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('CNormLoss/train', (total_cnorm_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('TNormLoss/train', (total_tnorm_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('MaxDotLoss/train', (total_max_dot_loss/total_train_size).item(), epoch)
+
             print("Train Accuracy: " + str((total_train_acc/total_train_size).item()))
             print("Train Loss: " + str((total_train_loss/total_train_size).item()))
+
 
             total_valid_loss = self.run_valid(valid_loader, epoch, pseudo=False, desc_valid=desc_valid)
 
@@ -400,6 +462,14 @@ class Module(nn.Module):
 
         self.eval()
         total_valid_loss = torch.tensor(0, dtype=torch.float)
+        total_class_loss = torch.tensor(0, dtype=torch.float)
+        total_sum_loss = torch.tensor(0, dtype=torch.float)
+        total_equal_loss = torch.tensor(0, dtype=torch.float)
+        total_hnorm_loss = torch.tensor(0, dtype=torch.float)
+        total_cnorm_loss = torch.tensor(0, dtype=torch.float)
+        total_tnorm_loss = torch.tensor(0, dtype=torch.float)
+        total_max_dot_loss = torch.tensor(0, dtype=torch.float)
+
         total_valid_acc = torch.tensor(0, dtype=torch.float)
         total_valid_size = torch.tensor(0, dtype=torch.float)
 
@@ -410,7 +480,7 @@ class Module(nn.Module):
 
         with torch.no_grad():
             for batch in loader:
-                highs, contexts, targets, labels, highs_lens, contexts_mask, targets_mask, target_length = batch
+                highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -418,15 +488,29 @@ class Module(nn.Module):
                 targets = targets.to(self.device)
                 labels = labels.to(self.device)
                 highs_lens = highs_lens.to(self.device)
-                contexts_mask = contexts_mask.to(self.device)
-                targets_mask = targets_mask.to(self.device)
+                contexts_lens = contexts_lens.to(self.device)
+                targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_mask, targets_mask)
+                logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                loss = F.nll_loss(logits, labels)
+                classification_loss = F.nll_loss(logits, labels)
+                sum_loss = F.mse_loss(hdotc, hnorm - hdott)
+                equal_loss = F.mse_loss(hnorm, highdottraj)
+                hnorm_loss = sum([hnorm[i] if hnorm[i].item() > torch.tensor(1.) else 0 for i in range(hnorm.shape[0])]) * self.args.lbda
+                cnorm_loss = sum([cnorm[i] if cnorm[i].item() > torch.tensor(1.) else 0 for i in range(cnorm.shape[0])]) * self.args.lbda
+                tnorm_loss = sum([tnorm[i] if tnorm[i].item() > torch.tensor(1.) else 0 for i in range(tnorm.shape[0])]) * self.args.lbda
+                max_dot_loss = -highdottraj.sum()
+                loss = classification_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
                 total_valid_loss += loss
+                total_class_loss += classification_loss
+                total_sum_loss += sum_loss
+                total_equal_loss += equal_loss
+                total_hnorm_loss += hnorm_loss
+                total_cnorm_loss += cnorm_loss
+                total_tnorm_loss += tnorm_loss
+                total_max_dot_loss = max_dot_loss
                 total_valid_size += labels.shape[0]
                 most_likely = torch.argmax(logits, dim=1)
                 acc = torch.eq(most_likely, labels)
@@ -435,11 +519,25 @@ class Module(nn.Module):
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
             self.writer.add_scalar('Loss/validation', (total_valid_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('ClassificationLoss/validation', (total_class_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('SumLoss/validation', (total_sum_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('EqualLoss/validation', (total_equal_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('HNormLoss/validation', (total_hnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('CNormLoss/validation', (total_cnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('TNormLoss/validation', (total_tnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('MaxDotLoss/validation', (total_max_dot_loss/total_valid_size).item(), epoch)
             print("Validation Accuracy: " + str((total_valid_acc/total_valid_size).item()))
             print("Validation Loss: " + str((total_valid_loss/total_valid_size).item()))
         else:
             self.writer.add_scalar('PseudoAccuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
             self.writer.add_scalar('PseudoLoss/validation', (total_valid_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoClassificationLoss/validation', (total_class_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoSumLoss/validation', (total_sum_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoEqualLoss/validation', (total_equal_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoHNormLoss/validation', (total_hnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoCNormLoss/validation', (total_cnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoTNormLoss/validation', (total_tnorm_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoMaxDotLoss/validation', (total_max_dot_loss/total_valid_size).item(), epoch)
 
 
         return total_valid_loss

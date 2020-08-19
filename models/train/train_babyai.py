@@ -25,7 +25,7 @@ if __name__ == '__main__':
     parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
     parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
-    parser.add_argument('--model', help='model to use', default='cpv_multi_baseline_babyai')
+    parser.add_argument('--model', help='model to use', default='cpv_multi_babyai')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--pseudo', help='track more finely', action='store_true')
     parser.add_argument('--workers', help='num workers', default=16, type=int)
@@ -46,6 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--action_loss_wt', help='weight of action loss', default=1., type=float)
     parser.add_argument('--subgoal_aux_loss_wt', help='weight of subgoal completion predictor', default=0., type=float)
     parser.add_argument('--pm_aux_loss_wt', help='weight of progress monitor', default=0., type=float)
+    parser.add_argument('--lbda', help='weight applied to norms', default=100., type=float)
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')
