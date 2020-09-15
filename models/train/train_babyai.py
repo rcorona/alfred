@@ -20,12 +20,12 @@ if __name__ == '__main__':
 
     # settings
     parser.add_argument('--seed', help='random seed', default=123, type=int)
-    parser.add_argument('--data', help='dataset folder', default='data/babyai')
-    parser.add_argument('--splits', help='json file containing train/dev/test splits', default='data/babyai')
+    parser.add_argument('--data', help='dataset folder', default='data/babyai_simple_subset')
+    parser.add_argument('--splits', help='json file containing train/dev/test splits', default='data/babyai_simple_subset')
     parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
     parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
     parser.add_argument('--save_every_epoch', help='save model after every epoch (warning: consumes a lot of space)', action='store_true')
-    parser.add_argument('--model', help='model to use', default='cpv_multi_babyai')
+    parser.add_argument('--model', help='model to use', default='cpv_babyai')
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--pseudo', help='track more finely', action='store_true')
     parser.add_argument('--workers', help='num workers', default=16, type=int)
