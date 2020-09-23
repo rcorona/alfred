@@ -207,6 +207,7 @@ class Module(nn.Module):
         args = args or self.args
         self.writer = SummaryWriter('runs/babyai_cpv_simple_subset')
         fsave = os.path.join(args.dout, 'best.pth')
+        psave = os.path.join(args.dout, 'pseudo_best.pth')
 
         with open(splits['train'], 'r') as file:
             train_data = json.load(file)
@@ -277,8 +278,8 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/context_lens[b] + target_lens[b]
-                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 + progress * correctness_mask)
+                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
+                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 * progress * correctness_mask)
                 sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
                 equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
                 hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
@@ -312,6 +313,13 @@ class Module(nn.Module):
                     self.write(pseudo_loss, pseudo_size, pseudo_epoch, pseudo=True)
                     self.run_valid(valid_loader, pseudo_epoch, pseudo=True)
 
+                    torch.save({
+                        'model': self.state_dict(),
+                        'optim': optimizer.state_dict(),
+                        'args': self.args,
+                        'vocab': self.vocab
+                    }, psave)
+
                     pseudo_epoch += 1
                     batch_idx = -1
                     pseudo_size = torch.tensor(0, dtype=torch.float)
@@ -327,16 +335,16 @@ class Module(nn.Module):
                 self.train()
                 batch_idx += 1
 
-            self.write(loss, size, epoch, pseudo)
+            self.write(loss, size, epoch, pseudo=False)
             valid_loss = self.run_valid(valid_loader, epoch, desc_valid=desc_valid)
 
-            print("Train Loss: " + (loss["total"]/size).item())
-            print("Validation Loss: " + (valid_loss["total"]/size).item())
+            print("Train Loss: " + str((loss["total"]/size).item()))
+            print("Validation Loss: " + str((valid_loss["total"]/size).item()))
 
             self.writer.flush()
 
             if valid_loss["total"] < best_loss:
-                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
+                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(valid_loss["total"], fsave))
                 torch.save({
                     'model': self.state_dict(),
                     'optim': optimizer.state_dict(),
