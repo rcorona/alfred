@@ -224,7 +224,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
                  teacher_forcing=False, n_modules=8, controller_type='attention',
                  cloned_module_initialization=False, 
                  init_model_path=None,
-                 modularize_actor_mask=False):
+                 modularize_actor_mask=False,
+                 h_translation=None, c_translation=None
+                 ):
         super().__init__()
         demb = emb.weight.size(1)
         self.controller_type = controller_type
@@ -255,6 +257,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
             self.stop_embedding = None
             self.module_attn = None
 
+        self._h_translation = h_translation
+        self._c_translation = c_translation
+
         # STOP module for high level controller.
         self.stop_embedding = torch.nn.init.uniform_(nn.Parameter(torch.zeros((self.dhid,))))
 
@@ -268,6 +273,24 @@ class ConvFrameMaskDecoderModular(nn.Module):
         self.teacher_forcing = teacher_forcing
 
         nn.init.uniform_(self.go, -0.1, 0.1)
+
+        if self.h_translation == 'linear':
+            self.h_translators_in = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+            self.h_translators_out = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+        elif self.h_translation == None:
+            self.h_translators_in = [lambda x: x for _ in range(n_modules)]
+            self.h_translators_out = [lambda x: x for _ in range(n_modules)]
+        else:
+            raise NotImplementedError("--h_translation {}".format(self.h_translation))
+
+        if self.c_translation == 'linear':
+            self.c_translators_in = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+            self.c_translators_out = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+        elif self.c_translation == None:
+            self.c_translators_in = [lambda x: x for _ in range(n_modules)]
+            self.c_translators_out = [lambda x: x for _ in range(n_modules)]
+        else:
+            raise NotImplementedError("--c_translation {}".format(self.c_translation))
 
         if cloned_module_initialization:
  
@@ -298,26 +321,48 @@ class ConvFrameMaskDecoderModular(nn.Module):
             self.attn = nn.ModuleList([clone_module(self.attn) for i in range(n_modules)])
             self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
 
+            # TODO: make this an argument
             # Freeze GotoLocation module. 
-            for p in self.cell[0].parameters(): 
-                p.requires_grad = False
-
-            for p in self.attn[0].parameters():
-                p.requires_grad = False
-
-            for p in self.h_tm1_fc[0].parameters(): 
-                p.requires_grad = False
+            # for p in self.cell[0].parameters():
+            #     p.requires_grad = False
+            #
+            # for p in self.attn[0].parameters():
+            #     p.requires_grad = False
+            #
+            # for p in self.h_tm1_fc[0].parameters():
+            #     p.requires_grad = False
 
             if modularize_actor_mask: 
                 self.actor = nn.ModuleList([clone_module(self.actor) for i in range(n_modules)])
                 self.mask_dec = nn.ModuleList([clone_module(self.mask_dec) for i in range(n_modules)])
+
+            if self.h_translation == 'linear':
+                raise NotImplementedError("initialize the linear layers to identity functions")
+
+            if self.c_translation == 'linear':
+                raise NotImplementedError("initialize the linear layers to identity functions")
 
         else:
             self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])
             self.attn = nn.ModuleList([DotAttn() for i in range(n_modules)])
             self.h_tm1_fc = nn.ModuleList([nn.Linear(dhid, dhid) for i in range(n_modules)])
 
-    def step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+    # for backward compatibility with serialized models
+    @property
+    def h_translation(self):
+        try:
+            return self._h_translation
+        except:
+            return None
+
+    @property
+    def c_translation(self):
+        try:
+            return self._c_translation
+        except:
+            return None
+
+    def step(self, enc, frame, e_t, state_tm1, state_transitioned_tm1, controller_state_tm1, controller_mask=None,
              transition_mask=None, next_transition_mask=None,
              hstate_dropout_mask=None,
              ):
@@ -326,20 +371,24 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         if not self.modularize_actor_mask: 
             return self.single_actor_mask_step(
-                enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask,
+                enc, frame, e_t, state_tm1, state_transitioned_tm1, controller_state_tm1,
+                controller_mask, transition_mask, next_transition_mask,
                 hstate_dropout_mask
             )
         else:
             return self.multiple_actor_mask_step(
-                enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask, transition_mask, next_transition_mask,
+                enc, frame, e_t, state_tm1, state_transitioned_tm1, controller_state_tm1,
+                controller_mask, transition_mask, next_transition_mask,
                 hstate_dropout_mask
             )
 
-    def multiple_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+    def multiple_actor_mask_step(self, enc, frame, e_t, state_tm1, state_transitioned_tm1,
+                                 controller_state_tm1, controller_mask=None,
                                  transition_mask=None, next_transition_mask=None,
                                  hstate_dropout_mask=None):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
+        raise NotImplementedError("implement state_transitioned_tm1 in multiple_actor_mask_step")
         h_tm1 = state_tm1[0]
 
         batch_sz = frame.size(0)
@@ -435,11 +484,67 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
-    def single_actor_mask_step(self, enc, frame, e_t, state_tm1, controller_state_tm1, controller_mask=None,
+    def translate(self, var, transforms, controller_mask):
+        # TODO: this might be faster with unconditional computation and a gather
+        # controller_mask: bsz x (num_modules+1)
+        transformed = []
+        for batch_index in range(controller_mask.size(0)):
+            modules_active = controller_mask[batch_index].nonzero().flatten()
+            assert modules_active.size(0) <= 1
+            if modules_active.size() == 1 and modules_active.item() < len(transforms):
+                transform = transforms[modules_active.item()]
+                transformed.append(transform(var[batch_index]))
+            else:
+                transformed.append(var[batch_index])
+        return torch.stack(transformed, 0)
+
+    def transform_h_in(self, h, controller_mask):
+        if self.h_translation is None:
+            return h
+        return self.translate(h, self.h_translators_in, controller_mask)
+
+    def transform_h_out(self, h, controller_mask):
+        if self.h_translation is None:
+            return h
+        return self.translate(h, self.h_translators_out, controller_mask)
+
+    def transform_c_in(self, c, controller_mask):
+        if self.c_translation is None:
+            return c
+        return self.translate(c, self.c_translators_in, controller_mask)
+
+    def transform_c_out(self, c, controller_mask):
+        if self.c_translation is None:
+            return c
+        return self.translate(c, self.c_translators_out, controller_mask)
+
+
+    def single_actor_mask_step(self, enc, frame, e_t, state_tm1, state_transitioned_tm1,
+                               controller_state_tm1, controller_mask=None,
                                transition_mask=None, next_transition_mask=None, hstate_dropout_mask=None):
         # transition_mask and next_transition_mask are not
         # previous decoder hidden state for modules.
-        h_tm1 = state_tm1[0]
+
+        # h_tm1 = state_tm1[0]
+        # c_tm1 = state_tm1[1]
+
+        if self.controller_type == 'attention':
+            raise NotImplementedError()
+
+        if transition_mask.sum() > 0:
+            h_tm1, c_tm1 = state_tm1
+            h_tm1 = h_tm1.clone()
+            c_tm1 = c_tm1.clone()
+            # need the byte case here because otherwise it will treat transition_mask as indices
+            byte_tm = transition_mask.byte()
+            h_tm1[byte_tm] = self.transform_h_in(
+                state_transitioned_tm1[0][byte_tm], controller_mask[byte_tm]
+            )
+            c_tm1[transition_mask.byte()] = self.transform_c_in(
+                state_transitioned_tm1[1][byte_tm], controller_mask[byte_tm]
+            )
+        else:
+            h_tm1, c_tm1 = state_tm1
 
         batch_sz = frame.size(0)
 
@@ -465,7 +570,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             inp_t.append(inp_ti.unsqueeze(1))
 
             # update hidden state
-            state_t = self.cell[i](inp_ti, (h_tm1, state_tm1[1]))
+            state_t = self.cell[i](inp_ti, (h_tm1, c_tm1))
             h, c = [self.hstate_dropout(x) for x in state_t]
             if hstate_dropout_mask is not None:
                 h = hstate_dropout_mask * h
@@ -476,14 +581,16 @@ class ConvFrameMaskDecoderModular(nn.Module):
             c_t.append(state_t[1])
 
         # Attend over each modules output.
-        h_t_in = self.attn_dropout(torch.cat([h.unsqueeze(1) for h in h_t], dim=1)) # batch x n_modules x dhid
+        h_t = torch.cat([h.unsqueeze(1) for h in h_t], dim=1) # batch x n_modules x dhid
         c_t = torch.cat([c.unsqueeze(1) for c in c_t], dim=1)
+
+        h_t_in = self.attn_dropout(h_t)
+        # Add stop embedding.
+        h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
+
         inp_t = torch.cat(inp_t, dim=1)
         lang_attn_t = torch.cat(lang_attn_t, dim=-1)
 
-        # Add stop embedding. 
-
-        h_t_in = torch.cat([h_t_in, self.stop_embedding.view(1,1,-1).expand(h_t_in.size(0), 1, self.dhid)], dim=1)
 
         # Attend over submodules hidden states. 
         # TODO Use ground truth attention here if provided, but keep generated attention since we need it to train attention mechanism.
@@ -507,10 +614,16 @@ class ConvFrameMaskDecoderModular(nn.Module):
         else:
             module_attn = controller_mask.unsqueeze(-1).float()
 
+        h_t = module_attn[:,:-1,:].expand_as(h_t).mul(h_t).sum(1)
         h_t_in = module_attn.expand_as(h_t_in).mul(h_t_in).sum(1)
         c_t = module_attn[:,:-1,:].expand_as(c_t).mul(c_t).sum(1)
         inp_t = module_attn[:,:-1,:].expand_as(inp_t).mul(inp_t).sum(1)
         lang_attn_t = module_attn[:,:-1,:].view(batch_sz,1,8).expand_as(lang_attn_t).mul(lang_attn_t).sum(-1)
+
+        if controller_mask is None:
+            raise NotImplementedError()
+        h_t_translated = self.transform_h_out(h_t, controller_mask)
+        c_t_translated = self.transform_c_out(h_t, controller_mask)
 
         # decode action and mask
         cont_t = torch.cat([h_t_in, inp_t], dim=1) # TODO Add controller_lang_emb
@@ -529,15 +642,18 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
         # Package weighted state for output. 
         state_t = (h_t_in, c_t)
+        state_transitioned_t = (h_t_translated, c_t_translated)
 
-        return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
+        return action_t, mask_t, state_t, state_transitioned_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None, hstate_dropout_mask=None):
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, state_0_transitioned=None,
+                controller_state_0=None, controller_mask=None, transition_mask=None, hstate_dropout_mask=None):
         # transition_mask is not used
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)
         state_t = state_0
+        state_t_transitioned = state_0_transitioned
         controller_state_t = controller_state_0
 
         actions = []
@@ -557,8 +673,11 @@ class ConvFrameMaskDecoderModular(nn.Module):
             else: 
                 controller_mask_in = controller_mask[:,t]
 
-            action_t, mask_t, state_t, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(
-                enc, frames[:, t], e_t, state_t, controller_state_t, controller_mask_in, hstate_dropout_mask=hstate_dropout_mask
+            action_t, mask_t, state_t, state_t_transitioned, controller_state_t, attn_score_t, module_attn_score_t, module_attn_t = self.step(
+                enc, frames[:, t], e_t, state_t, state_t_transitioned, controller_state_t, controller_mask_in,
+                transition_mask=transition_mask[:,t],
+                next_transition_mask=transition_mask[:,t+1] if t+1 < transition_mask.size(1) else None,
+                hstate_dropout_mask=hstate_dropout_mask
             )
             masks.append(mask_t)
             actions.append(action_t)
@@ -578,6 +697,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             'out_action_low_mask': torch.stack(masks, dim=1),
             'out_attn_scores': torch.stack(attn_scores, dim=1),
             'state_t': state_t,
+            'state_t_transitioned': state_t_transitioned,
             'controller_state': controller_state_t,
             'modules_used': torch.stack(modules_used, dim=1)
         }
@@ -802,6 +922,11 @@ class SubtaskModule(nn.Module):
     #     return self.hx, self.cx
     
     def forward(self, x, controller_mask, outer_h, transition_mask):
+        # x: bsz x _
+        # controller_mask: n_modules x bsz
+        # outer_h: bsz x _
+        # transition_mask: bsz
+        # self.hx: bsz x _
         t_mask = transition_mask.unsqueeze(1) #[:, self.index].unsqueeze(1)
         t_mask = t_mask.float()
         # If not transitioning, keep current mask, if transitioning, then replace h with translation of the input h.
@@ -848,8 +973,10 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
     def __init__(self, emb, dframe, dhid, pframe=300,
                  attn_dropout=0., hstate_dropout=0., actor_dropout=0., input_dropout=0.,
                  teacher_forcing=False, n_modules=8, use_fc_nodes=True, controller_type='attention',
-                 cloned_module_initialization=False):
+                 cloned_module_initialization=False, init_model_path=None, modularize_actor_mask=False):
         super().__init__()
+        assert init_model_path is None
+        assert not modularize_actor_mask
         demb = emb.weight.size(1)
         self.controller_type = controller_type
         self.cloned_module_initialization = cloned_module_initialization
@@ -991,8 +1118,8 @@ class ConvFrameMaskDecoderModularIndependent(nn.Module):
 
         return action_t, mask_t, state_t, controller_state_t, lang_attn_t, module_attn_logits_ret, module_attn
 
-    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None):
-        print("forward")
+    def forward(self, enc, frames, gold=None, max_decode=150, state_0=None, controller_state_0=None, controller_mask=None, transition_mask=None, hstate_dropout_mask=None):
+        # TODO: use hstate_dropout_mask
         max_t = gold.size(1) if self.training else min(max_decode, frames.shape[1])
         batch = enc.size(0)
         e_t = self.go.repeat(batch, 1)

@@ -120,8 +120,10 @@ class Module(Base):
                            controller_type=self.controller_type,
                            cloned_module_initialization=cloned_module_initialization, # TODO(dfried): add controller type for ConvFrameMaskDecoderProgressMonitor
                            init_model_path=init_model_path,
-                           modularize_actor_mask=modularize_actor_mask
-                           ) 
+                           modularize_actor_mask=modularize_actor_mask,
+                           h_translation=args.hierarchical_h_translation,
+                           c_translation=args.hierarchical_c_translation,
+                           )
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)
         self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
@@ -336,7 +338,9 @@ class Module(Base):
         cont_lang, enc_lang = self.encode_lang(feat)
 
         # Each module will have its own cell, but all will share a hidden state. TODO should we only have one cell state too? 
-        state_0 = h, c = cont_lang[0], torch.zeros_like(cont_lang[0])
+        state_0_transitioned = h, c = cont_lang[0], torch.zeros_like(cont_lang[0])
+        # hacky check: use nans here to ensure that we're taking from transitioned for the initial state
+        state_0 = torch.full_like(state_0_transitioned[0], float("nan")), torch.full_like(state_0_transitioned[1], float("nan"))
         if self.args.variational_hstate_dropout != 0.0 and self.training:
             hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
         else:
@@ -358,7 +362,8 @@ class Module(Base):
         transition_mask = feat['transition_mask']
 
         res = self.dec(
-            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0,
+            enc_lang, frames, max_decode=max_decode, gold=feat['action_low'],
+            state_0=state_0, state_0_transitioned=state_0_transitioned,
             controller_state_0=controller_state_0, controller_mask=controller_mask,
             transition_mask=transition_mask, hstate_dropout_mask=hstate_dropout_mask
         )
@@ -381,6 +386,7 @@ class Module(Base):
         '''
         self.r_state = {
             'state_t': None,
+            'state_transitioned_t': None,
             'e_t': None,
             'cont_lang': None,
             'enc_lang': None,
@@ -406,7 +412,8 @@ class Module(Base):
                 hstate_dropout_mask = dropout_mask_like(h, self.args.variational_hstate_dropout)
             else:
                 hstate_dropout_mask = torch.full_like(h, 1.0)
-            self.r_state['state_t'] = h, c
+            self.r_state['state_transitioned_t'] = h, c
+            self.r_state['state_t'] = torch.full_like(h, float("nan")), torch.full_like(c, float("nan"))
             self.r_state['hstate_dropout_mask'] = hstate_dropout_mask
             if self.controller_type == 'attention':
                 self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
@@ -438,9 +445,10 @@ class Module(Base):
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
 
         # decode and save embedding and hidden states
-        out_action_low, out_action_low_mask, state_t, controller_state_t, _, controller_attn_logits, out_controller_attn = self.dec.step(
+        out_action_low, out_action_low_mask, state_t, state_transitioned_t, controller_state_t, _, controller_attn_logits, out_controller_attn = self.dec.step(
             self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t,
-            state_tm1=self.r_state['state_t'], controller_state_tm1=self.r_state['controller_state_t'],
+            state_tm1=self.r_state['state_t'], state_transitioned_tm1=self.r_state['state_transitioned_t'],
+            controller_state_tm1=self.r_state['controller_state_t'],
             controller_mask=self.r_state['subgoal'],
             hstate_dropout_mask=self.r_state['hstate_dropout_mask'],
         )
@@ -478,6 +486,7 @@ class Module(Base):
 
         # save states
         self.r_state['state_t'] = state_t
+        self.r_state['state_transitioned_t'] = state_transitioned_t
         self.r_state['controller_state_t'] = controller_state_t
         self.r_state['e_t'] = self.dec.emb(max_action_low)
 
