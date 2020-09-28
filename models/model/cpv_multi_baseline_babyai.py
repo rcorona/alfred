@@ -203,18 +203,34 @@ class Module(nn.Module):
         # Encoding:
         enc_contexts, _, _ = self.encoder(packed_contexts, batch_size, h_t, c_t) # -> B x H
 
-        ## TARGETS ##
+        ### TARGETS ###
         # Packing:
         packed_targets = pack_padded_sequence(targets, targets_lens, batch_first=True, enforce_sorted=False)
         # Encoding:
         enc_targets, _, _ = self.encoder(targets, batch_size, None, None) # -> B x H
+
+        ### FULL TRAJ ###
+        # Packing:
+        # Packing:
+        packed_contexts = pack_padded_sequence(contexts, contexts_lens, batch_first=True, enforce_sorted=False)
+        # Encoding:
+        enc_traj, h_t, c_t = self.encoder(packed_contexts, batch_size, None, None) # -> B x H
+        # Packing:
+        packed_targets = pack_padded_sequence(targets, targets_lens, batch_first=True, enforce_sorted=False)
+        # Encoding:
+        enc_traj, _, _ = self.encoder(targets, batch_size, h_t, c_t) # -> B x H
+
 
         ### COMB ###
         # Dot Product:
         sim_m = torch.matmul(enc_contexts, torch.transpose(enc_targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
 
-        return logits
+        highdottraj = torch.bmmm(enc_highs.reshape(batch_size, 1, -1), enc_traj(batch_size, -1, 1))
+        hnorm = torch.bmm(enc_highs.reshape(batch_size, 1, -1), enc_highs.reshape(batch_size, -1, 1)).squeeze()
+
+
+        return logits, highdottraj, hnorm
 
     def run_train(self, splits, optimizer, args=None):
 
@@ -278,10 +294,10 @@ class Module(nn.Module):
                 contexts_lens = contexts_lens.to(self.device)
                 targets_lens = targets_lens.to(self.device)
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits, highdottraj, hnorm = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                loss = F.nll_loss(logits, labels)
+                loss = F.nll_loss(logits, labels) + F.mse(highdottraj, hnorm**2)
                 total_train_loss += loss
                 pseudo_train_loss += loss
                 total_train_size += labels.shape[0]
@@ -381,10 +397,10 @@ class Module(nn.Module):
                 targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits, highdottraj, hnorm = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                loss = F.nll_loss(logits, labels)
+                loss = F.nll_loss(logits, labels) + F.mse(highdottraj, hnorm**2)
                 total_valid_loss += loss
                 total_valid_size += labels.shape[0]
                 most_likely = torch.argmax(logits, dim=1)

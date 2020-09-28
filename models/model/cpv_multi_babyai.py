@@ -239,23 +239,29 @@ class Module(nn.Module):
         # Dot product:
         sim_m = torch.matmul(comb_contexts, torch.transpose(targets, 0, 1)) # -> B x B
         logits = F.log_softmax(sim_m, dim = 1)
+
+        alldotprods = torch.matmul(contexts, torch.transpose(highs, 0, 1))
         # How far along are we
         hdotc = torch.bmm(highs.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1)).squeeze()
         hdott = torch.bmm(highs.reshape(batch_size, 1, -1), targets.reshape(batch_size, -1, 1)).squeeze()
-        hnorm = torch.bmm(highs.reshape(batch_size, 1, -1), highs.reshape(batch_size, -1, 1)).squeeze()
-        cnorm = torch.bmm(contexts.reshape(batch_size, 1, -1), contexts.reshape(batch_size, -1, 1)).squeeze()
-        tnorm = torch.bmm(targets.reshape(batch_size, 1, -1), targets.reshape(batch_size, -1, 1)).squeeze()
-
         highdottraj = torch.bmm(highs.reshape(batch_size, 1, -1), traj.reshape(batch_size, -1, 1)).squeeze()
 
-        return logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj
+        highcostraj = F.cosine_similarity(highs, traj)
+
+        hnorm = torch.norm(highs, dim=1)
+        cnorm = torch.norm(contexts, dim=1)
+        tnorm = torch.norm(targets, dim=1)
+
+
+
+        return logits, alldotprods, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj, highcostraj
 
     def run_train(self, splits, optimizer, args=None):
         print("Starting...")
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/babyai_cpv_weighted')
+        self.writer = SummaryWriter('runs/babyai_cpv_simple_subset')
         fsave = os.path.join(args.dout, 'best.pth')
 
         # Get splits
@@ -291,7 +297,7 @@ class Module(nn.Module):
             desc_valid = "Epoch " + str(epoch) + ", valid"
 
             total_train_loss = torch.tensor(0, dtype=torch.float)
-            total_class_loss = torch.tensor(0, dtype=torch.float)
+            total_contrast_loss = torch.tensor(0, dtype=torch.float)
             total_sum_loss = torch.tensor(0, dtype=torch.float)
             total_equal_loss = torch.tensor(0, dtype=torch.float)
             total_hnorm_loss = torch.tensor(0, dtype=torch.float)
@@ -304,7 +310,7 @@ class Module(nn.Module):
 
             if self.pseudo:
                 pseudo_train_size = torch.tensor(0, dtype=torch.float)
-                pseudo_class_loss = torch.tensor(0, dtype=torch.float)
+                pseudo_contrast_loss = torch.tensor(0, dtype=torch.float)
                 pseudo_sum_loss = torch.tensor(0, dtype=torch.float)
                 pseudo_equal_loss = torch.tensor(0, dtype=torch.float)
                 pseudo_hnorm_loss = torch.tensor(0, dtype=torch.float)
@@ -321,6 +327,7 @@ class Module(nn.Module):
             for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
                 highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
+                batch_size = args.batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -332,19 +339,25 @@ class Module(nn.Module):
                 targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits, alldotprods, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj, highcostraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                classification_loss = F.nll_loss(logits, labels) * args.lbda
-                sum_loss = F.mse_loss(hdotc, hnorm - hdott) * args.lbda
-                equal_loss = F.mse_loss(hnorm, highdottraj)
+                # classification_loss = F.nll_loss(logits, labels) * args.lbda
+                contrast_loss = 0
+                for b in range(batch_size):
+                    correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+                    correctness_mask[b] = 1
+                    contrast_loss += F.mse_loss(alldotprods[b], hnorm**2 * (contexts_lens[b]/(contexts_lens[b] + targets_lens[b])) * correctness_mask)
+                sum_loss = F.mse_loss(hdotc + hdott, hnorm**2) * args.lbda # Dot product <h, (c + t)> = <h, traj>
+                equal_loss = F.mse_loss(hnorm**2, highdottraj) # hnorm squared!!
                 hnorm_loss = sum([hnorm[i] if hnorm[i].item() > torch.tensor(1.) else 0 for i in range(hnorm.shape[0])]) * args.lbda
                 cnorm_loss = sum([cnorm[i] if cnorm[i].item() > torch.tensor(1.) else 0 for i in range(cnorm.shape[0])]) * args.lbda
                 tnorm_loss = sum([tnorm[i] if tnorm[i].item() > torch.tensor(1.) else 0 for i in range(tnorm.shape[0])]) * args.lbda
-                max_dot_loss = -highdottraj.sum()
-                loss = classification_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
+                max_dot_loss = -highcostraj.sum() # Cosine difference instead of dot product
+                loss = contrast_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
+
                 total_train_loss += loss
-                total_class_loss += classification_loss
+                total_contrast_loss += contrast_loss
                 total_sum_loss += sum_loss
                 total_equal_loss += equal_loss
                 total_hnorm_loss += hnorm_loss
@@ -352,7 +365,7 @@ class Module(nn.Module):
                 total_tnorm_loss += tnorm_loss
                 total_max_dot_loss += max_dot_loss
                 pseudo_train_loss += loss
-                pseudo_class_loss += classification_loss
+                pseudo_contrast_loss += contrast_loss
                 pseudo_sum_loss += sum_loss
                 pseudo_equal_loss += equal_loss
                 pseudo_hnorm_loss += hnorm_loss
@@ -387,7 +400,7 @@ class Module(nn.Module):
                     # Write to TensorBoardX
                     self.writer.add_scalar('PseudoAccuracy/train', (pseudo_train_acc/pseudo_train_size).item(), pseudo_epoch)
                     self.writer.add_scalar('PseudoLoss/train', (pseudo_train_loss/pseudo_train_size).item(), pseudo_epoch)
-                    self.writer.add_scalar('PseudoClassificationLoss/train', (pseudo_class_loss/pseudo_train_size).item(), pseudo_epoch)
+                    self.writer.add_scalar('PseudoContrastLoss/train', (pseudo_contrast_loss/pseudo_train_size).item(), pseudo_epoch)
                     self.writer.add_scalar('PseudoSumLoss/train', (pseudo_sum_loss/pseudo_train_size).item(), pseudo_epoch)
                     self.writer.add_scalar('PseudoEqualLoss/train', (pseudo_equal_loss/pseudo_train_size).item(), pseudo_epoch)
                     self.writer.add_scalar('PseudoHNormLoss/train', (pseudo_hnorm_loss/pseudo_train_size).item(), pseudo_epoch)
@@ -400,7 +413,7 @@ class Module(nn.Module):
                     pseudo_epoch += 1
                     batch_idx = -1
                     pseudo_train_loss = torch.tensor(0, dtype=torch.float)
-                    pseudo_class_loss = torch.tensor(0, dtype=torch.float)
+                    pseudo_contrast_loss = torch.tensor(0, dtype=torch.float)
                     pseudo_sum_loss = torch.tensor(0, dtype=torch.float)
                     pseudo_equal_loss = torch.tensor(0, dtype=torch.float)
                     pseudo_hnorm_loss = torch.tensor(0, dtype=torch.float)
@@ -430,7 +443,7 @@ class Module(nn.Module):
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/train', (total_train_acc/total_train_size).item(), epoch)
             self.writer.add_scalar('Loss/train', (total_train_loss/total_train_size).item(), epoch)
-            self.writer.add_scalar('ClassificationLoss/train', (total_class_loss/total_train_size).item(), epoch)
+            self.writer.add_scalar('ContrastLoss/train', (total_contrast_loss/total_train_size).item(), epoch)
             self.writer.add_scalar('SumLoss/train', (total_sum_loss/total_train_size).item(), epoch)
             self.writer.add_scalar('EqualLoss/train', (total_equal_loss/total_train_size).item(), epoch)
             self.writer.add_scalar('HNormLoss/train', (total_hnorm_loss/total_train_size).item(), epoch)
@@ -462,7 +475,7 @@ class Module(nn.Module):
 
         self.eval()
         total_valid_loss = torch.tensor(0, dtype=torch.float)
-        total_class_loss = torch.tensor(0, dtype=torch.float)
+        total_contrast_loss = torch.tensor(0, dtype=torch.float)
         total_sum_loss = torch.tensor(0, dtype=torch.float)
         total_equal_loss = torch.tensor(0, dtype=torch.float)
         total_hnorm_loss = torch.tensor(0, dtype=torch.float)
@@ -481,6 +494,7 @@ class Module(nn.Module):
         with torch.no_grad():
             for batch in loader:
                 highs, contexts, targets, labels, highs_lens, contexts_lens, targets_lens, target_length = batch
+                batch_size = self.args.batch
 
                 # Transfer to GPU
                 highs = highs.to(self.device)
@@ -492,19 +506,24 @@ class Module(nn.Module):
                 targets_lens = targets_lens.to(self.device)
 
                 # Forward
-                logits, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
+                logits, alldotprods, hdotc, hdott, hnorm, cnorm, tnorm, highdottraj, highcostraj = self.forward(highs, contexts, targets, highs_lens, contexts_lens, targets_lens)
 
                 # Calculate Loss and Accuracy
-                classification_loss = F.nll_loss(logits, labels)
-                sum_loss = F.mse_loss(hdotc, hnorm - hdott)
-                equal_loss = F.mse_loss(hnorm, highdottraj)
+                contrast_loss = 0
+                for b in range(batch_size):
+                    correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+                    correctness_mask[b] = 1
+                    contrast_loss += F.mse_loss(alldotprods[b], hnorm**2 * (contexts_lens[b]/(contexts_lens[b] + targets_lens[b])) * correctness_mask)
+                sum_loss = F.mse_loss(hdotc + hdott, hnorm**2) * self.args.lbda # Dot product <h, (c + t)> = <h, traj>
+                equal_loss = F.mse_loss(hnorm**2, highdottraj) # hnorm squared!!
                 hnorm_loss = sum([hnorm[i] if hnorm[i].item() > torch.tensor(1.) else 0 for i in range(hnorm.shape[0])]) * self.args.lbda
                 cnorm_loss = sum([cnorm[i] if cnorm[i].item() > torch.tensor(1.) else 0 for i in range(cnorm.shape[0])]) * self.args.lbda
                 tnorm_loss = sum([tnorm[i] if tnorm[i].item() > torch.tensor(1.) else 0 for i in range(tnorm.shape[0])]) * self.args.lbda
-                max_dot_loss = -highdottraj.sum()
-                loss = classification_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
+                max_dot_loss = -highcostraj.sum() # Cosine difference instead of dot product
+                loss = contrast_loss + max_dot_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss
+
                 total_valid_loss += loss
-                total_class_loss += classification_loss
+                total_contrast_loss += contrast_loss
                 total_sum_loss += sum_loss
                 total_equal_loss += equal_loss
                 total_hnorm_loss += hnorm_loss
@@ -519,7 +538,7 @@ class Module(nn.Module):
             # Write to TensorBoardX
             self.writer.add_scalar('Accuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
             self.writer.add_scalar('Loss/validation', (total_valid_loss/total_valid_size).item(), epoch)
-            self.writer.add_scalar('ClassificationLoss/validation', (total_class_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('ContrastLoss/validation', (total_contrast_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('SumLoss/validation', (total_sum_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('EqualLoss/validation', (total_equal_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('HNormLoss/validation', (total_hnorm_loss/total_valid_size).item(), epoch)
@@ -531,7 +550,7 @@ class Module(nn.Module):
         else:
             self.writer.add_scalar('PseudoAccuracy/validation', (total_valid_acc/total_valid_size).item(), epoch)
             self.writer.add_scalar('PseudoLoss/validation', (total_valid_loss/total_valid_size).item(), epoch)
-            self.writer.add_scalar('PseudoClassificationLoss/validation', (total_class_loss/total_valid_size).item(), epoch)
+            self.writer.add_scalar('PseudoContrastLoss/validation', (total_contrast_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('PseudoSumLoss/validation', (total_sum_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('PseudoEqualLoss/validation', (total_equal_loss/total_valid_size).item(), epoch)
             self.writer.add_scalar('PseudoHNormLoss/validation', (total_hnorm_loss/total_valid_size).item(), epoch)
