@@ -108,7 +108,9 @@ class EvalTask(Eval):
 
             # forward model
             if is_hierarchical:
-                m_out = model.step(feat, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal)
+                m_out = model.step(
+                    feat, oracle=args.oracle, module_idxs_per_subgoal=module_idxs_per_subgoal
+                )
             else:
                 if args.oracle:
                     raise NotImplementedError()

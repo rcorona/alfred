@@ -393,7 +393,8 @@ class Module(Base):
             'cont_lang': None,
             'enc_lang': None,
             'subgoal': None,
-            'subgoal_counter': 0
+            'subgoal_counter': 0,
+            'transition_mask': None,
         }
 
     def step(self, feat, prev_action=None, oracle=False, module_idxs_per_subgoal=None, allow_submodule_stop=True, force_submodule_stop=False):
@@ -421,6 +422,9 @@ class Module(Base):
                 self.r_state['controller_state_t'] = self.r_state['cont_lang'][1], torch.zeros_like(self.r_state['cont_lang'][1])
             else:
                 self.r_state['controller_state_t'] = None
+
+        if self.r_state['transition_mask'] is None:
+            self.r_state['transition_mask'] = torch.LongTensor([1]).to(self.r_state['e_t'].device)
 
         if oracle:
             assert module_idxs_per_subgoal is None, "can't pass both module_idxs_per_subgoal and oracle=True"
@@ -453,6 +457,7 @@ class Module(Base):
             controller_state_tm1=self.r_state['controller_state_t'],
             controller_mask=self.r_state['subgoal'],
             hstate_dropout_mask=self.r_state['hstate_dropout_mask'],
+            transition_mask=self.r_state['transition_mask'],
         )
         # out_controller_attn will always be a one-hot distribution. if self.r_state['subgoal'] = None, this will be
         # the argmax of the distribution predicted by the attention-based controller. Otherwise, it will equal to self.r_state['subgoal']
@@ -465,6 +470,9 @@ class Module(Base):
         # If current subgoal predicted stop, then change subgoal module.
         if force_submodule_stop or (allow_submodule_stop and max_action_low == self.stop_token):
             self.r_state['subgoal'] = None
+            self.r_state['transition_mask'].fill_(1)
+        else:
+            self.r_state['transition_mask'].fill_(0)
 
         # Select next subgoal module to pay attention to.
         if self.r_state['subgoal'] is None:
