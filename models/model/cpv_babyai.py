@@ -44,9 +44,18 @@ class CPVDataset(Dataset):
             imgs = np.split(imgs, len(imgs) // 7)
             img_file.close()
 
-        final_shape = len(imgs[0]) * len(imgs[0][0]) * len(imgs[0][0][0]) # For babyai, this will be 147
+        final_shape = 7 * 7 * (11 + 6 + 3)
+        object_default = np.array([np.eye(11) for _ in range(49)])
+        color_default = np.array([np.eye(6) for _ in range(49)])
+        state_default = np.array([np.eye(3) for _ in range(49)])
 
-        low_levels = [torch.tensor(img, dtype=torch.float).reshape(final_shape) for img in imgs]
+        imgs = [np.reshape(img, (49, -1)) for img in imgs]
+
+        low_level_object = [torch.tensor(object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in imgs]
+        low_level_color = [torch.tensor(color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in imgs]
+        low_level_state = [torch.tensor(state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in imgs]
+
+        low_levels = [torch.cat([low_level_object[i], low_level_color[i], low_level_state[i]], dim=1).reshape(final_shape) for i in range(len(imgs))]
         target_idx = random.randrange(len(low_levels))
         target_length = torch.tensor(len(low_levels) - target_idx)
         low_level_target = low_levels[target_idx:] # -> T x 147
@@ -63,6 +72,7 @@ class CPVDataset(Dataset):
             padded_target = torch.stack(low_level_target, dim=0) # -> N x 147
 
         high_level = torch.tensor(data['num_instr'])
+
 
         return {"high" : high_level, "context": padded_context, "target": padded_target}
 
@@ -137,16 +147,18 @@ class Module(nn.Module):
         self.vocab = vocab
 
         self.pseudo = args.pseudo
-        self.img_shape = 7 * 7 * 3 # This is based off of the Babyai img size
+        self.img_shape = 7 * 7 * (11 + 6 + 3) # This is based off of the Babyai img size
 
         self.embed = nn.Embedding(len(self.vocab), args.demb)
-        self.linear = nn.Linear(args.demb, self.img_shape)
-        self.enc = nn.LSTM(self.img_shape, args.dhid, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(self.img_shape, args.demb)
+        self.lang_enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
+        self.img_enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
+
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         self.to(self.device)
 
-    def encoder(self, batch, batch_size, h_0=None, c_0=None):
+    def language_encoder(self, batch, batch_size, h_0=None, c_0=None):
         '''
         Encodes a stacked tensor.
         '''
@@ -154,7 +166,21 @@ class Module(nn.Module):
         if h_0 is None or c_0 is None:
             h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
             c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
-        out, (h, c) = self.enc(batch, (h_0, c_0)) # -> 2 x B x H
+        out, (h, c) = self.lang_enc(batch, (h_0, c_0)) # -> 2 x B x H
+
+        hid_sum = torch.sum(h, dim=0) # -> B x H
+
+        return hid_sum, h, c
+
+    def image_encoder(self, batch, batch_size, h_0=None, c_0=None):
+        '''
+        Encodes a stacked tensor.
+        '''
+
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+        out, (h, c) = self.img_enc(batch, (h_0, c_0)) # -> 2 x B x H
 
         hid_sum = torch.sum(h, dim=0) # -> B x H
 
@@ -169,20 +195,21 @@ class Module(nn.Module):
 
         ### High ###
         high = self.embed(high) # -> B x M x D
-        high = self.linear(high) # -> B x M x 147
         high = pack_padded_sequence(high, high_lens, batch_first=True, enforce_sorted=False)
-        high, _, _ = self.encoder(high, B) # -> B x H
+        high, _, _ = self.language_encoder(high, B) # -> B x H
 
         ### Context ###
+        context = self.linear(context)
         context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
-        context, h, c = self.encoder(context, B)
+        context, h, c = self.image_encoder(context, B)
 
         ### Target ###
+        target = self.linear(target)
         packed_target = pack_padded_sequence(target, target_lens, batch_first=True, enforce_sorted=False)
-        target, _, _ = self.encoder(packed_target, B)
+        target, _, _ = self.image_encoder(packed_target, B)
 
         ### Full Trajectory ###
-        trajectory, _, _ = self.encoder(packed_target, B, h, c)
+        trajectory, _, _ = self.image_encoder(packed_target, B, h, c)
 
         ### Combinations ###
         output = {}
@@ -205,8 +232,9 @@ class Module(nn.Module):
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/babyai_cpv_simple_subset')
+        self.writer = SummaryWriter('runs/babyai_cpv_with_cnn')
         fsave = os.path.join(args.dout, 'best.pth')
+        psave = os.path.join(args.dout, 'pseudo_best.pth')
 
         with open(splits['train'], 'r') as file:
             train_data = json.load(file)
@@ -277,8 +305,8 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/context_lens[b] + target_lens[b]
-                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 + progress * correctness_mask)
+                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
+                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 * progress * correctness_mask)
                 sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
                 equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
                 hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
@@ -312,6 +340,13 @@ class Module(nn.Module):
                     self.write(pseudo_loss, pseudo_size, pseudo_epoch, pseudo=True)
                     self.run_valid(valid_loader, pseudo_epoch, pseudo=True)
 
+                    torch.save({
+                        'model': self.state_dict(),
+                        'optim': optimizer.state_dict(),
+                        'args': self.args,
+                        'vocab': self.vocab
+                    }, psave)
+
                     pseudo_epoch += 1
                     batch_idx = -1
                     pseudo_size = torch.tensor(0, dtype=torch.float)
@@ -327,16 +362,16 @@ class Module(nn.Module):
                 self.train()
                 batch_idx += 1
 
-            self.write(loss, size, epoch, pseudo)
+            self.write(loss, size, epoch, pseudo=False)
             valid_loss = self.run_valid(valid_loader, epoch, desc_valid=desc_valid)
 
-            print("Train Loss: " + (loss["total"]/size).item())
-            print("Validation Loss: " + (valid_loss["total"]/size).item())
+            print("Train Loss: " + str((loss["total"]/size).item()))
+            print("Validation Loss: " + str((valid_loss["total"]/size).item()))
 
             self.writer.flush()
 
             if valid_loss["total"] < best_loss:
-                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(total_valid_loss, fsave))
+                print( "Obtained a new best validation loss of {:.2f}, saving model checkpoint to {}...".format(valid_loss["total"], fsave))
                 torch.save({
                     'model': self.state_dict(),
                     'optim': optimizer.state_dict(),
