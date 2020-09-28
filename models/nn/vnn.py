@@ -19,6 +19,16 @@ class SelfAttn(nn.Module):
         cont = scores.transpose(1, 2).bmm(inp).squeeze(1)
         return cont
 
+class MLPAdapter(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.l1 = nn.Linear(dim, dim)
+        self.l2 = nn.Linear(dim, dim)
+
+    def forward(self, inp):
+        return self.l2(torch.relu(self.l1(inp)))
+
 class DotAttn(nn.Module):
     '''
     dot-attention (or soft-attention)
@@ -277,6 +287,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
         if self.h_translation == 'linear':
             self.h_translators_in = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
             self.h_translators_out = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+        elif self.h_translation == 'mlp':
+            self.h_translators_in = nn.ModuleList([MLPAdapter(dhid) for _ in range(n_modules)])
+            self.h_translators_out = nn.ModuleList([MLPAdapter(dhid) for _ in range(n_modules)])
         elif self.h_translation == None:
             self.h_translators_in = [lambda x: x for _ in range(n_modules)]
             self.h_translators_out = [lambda x: x for _ in range(n_modules)]
@@ -286,6 +299,9 @@ class ConvFrameMaskDecoderModular(nn.Module):
         if self.c_translation == 'linear':
             self.c_translators_in = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
             self.c_translators_out = nn.ModuleList([nn.Linear(dhid, dhid) for _ in range(n_modules)])
+        elif self.h_translation == 'mlp':
+            self.c_translators_in = nn.ModuleList([MLPAdapter(dhid) for _ in range(n_modules)])
+            self.c_translators_out = nn.ModuleList([MLPAdapter(dhid) for _ in range(n_modules)])
         elif self.c_translation == None:
             self.c_translators_in = [lambda x: x for _ in range(n_modules)]
             self.c_translators_out = [lambda x: x for _ in range(n_modules)]
@@ -337,10 +353,20 @@ class ConvFrameMaskDecoderModular(nn.Module):
                 self.mask_dec = nn.ModuleList([clone_module(self.mask_dec) for i in range(n_modules)])
 
             if self.h_translation == 'linear':
-                raise NotImplementedError("initialize the linear layers to identity functions")
+                for layer in self.h_translators_in:
+                    layer.weight.data = torch.eye(layer.weight.size(0))
+                    layer.bias.data.fill_(0)
+                for layer in self.h_translators_out:
+                    layer.weight.data = torch.eye(layer.weight.size(0))
+                    layer.bias.data.fill_(0)
 
             if self.c_translation == 'linear':
-                raise NotImplementedError("initialize the linear layers to identity functions")
+                for layer in self.c_translators_in:
+                    layer.weight.data = torch.eye(layer.weight.size(0))
+                    layer.bias.data.fill_(0)
+                for layer in self.c_translators_out:
+                    layer.weight.data = torch.eye(layer.weight.size(0))
+                    layer.bias.data.fill_(0)
 
         else:
             self.cell = nn.ModuleList([nn.LSTMCell(dhid+dframe+demb, dhid) for i in range(n_modules)])

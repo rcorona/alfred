@@ -72,7 +72,8 @@ class Module(Base):
         init_model_path = vars(args).get("init_model_path", None)
         modularize_actor_mask = vars(args).get('modularize_actor_mask', None)
 
-        # Load pretrained parameters if desired. 
+        model_dict = self.state_dict()
+        # Load pretrained parameters if desired.
         if init_model_path: 
         
             # Load model parameters first. 
@@ -83,18 +84,19 @@ class Module(Base):
            
             for i in range(len(self.enc_att)): 
                 for k in params.keys(): 
-                    if 'enc_att' in k: 
+                    if 'enc_att' in k:
 
                         # Hack for getting the number inside the key. 
                         new_k = k.split('.')
                         new_k = [new_k[0]] + [str(i)] + new_k[1:]
                         new_k = '.'.join(new_k)
 
+                        assert new_k in model_dict
+
                         # Clone encoder attention. 
                         loading_params[new_k] = params[k]
 
             # Load parameters. 
-            model_dict = self.state_dict()
             model_dict.update(loading_params)
             self.load_state_dict(model_dict)
 
