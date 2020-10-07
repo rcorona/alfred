@@ -24,6 +24,9 @@ class BaselineDataset(Dataset):
         self.args = args
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
+        self.object_default = np.array([np.eye(11) for _ in range(49)])
+        self.color_default = np.array([np.eye(6) for _ in range(49)])
+        self.state_default = np.array([np.eye(3) for _ in range(49)])
 
     def featurize(self, ex):
         '''
@@ -44,11 +47,16 @@ class BaselineDataset(Dataset):
             imgs = np.split(imgs, len(imgs) // 7)
             img_file.close()
 
-        final_shape = len(imgs[0]) * len(imgs[0][0]) * len(imgs[0][0][0]) # For babyai, this will be 147
-            
+        final_shape = 7 * 7 * (11 + 6 + 3)
 
-        low_levels = [torch.tensor(img, dtype=torch.float).reshape(final_shape) for img in imgs]
 
+        imgs = [np.reshape(img, (49, -1)) for img in imgs]
+
+        low_level_object = [torch.tensor(self.object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in imgs]
+        low_level_color = [torch.tensor(self.color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in imgs]
+        low_level_state = [torch.tensor(self.state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in imgs]
+
+        low_levels = [torch.cat([low_level_object[i], low_level_color[i], low_level_state[i]], dim=1).reshape(final_shape) for i in range(len(imgs))]
         target_idx = random.randrange(len(low_levels))
         target_length = torch.tensor(len(low_levels) - target_idx)
         low_level_target = low_levels[target_idx:] # -> T x 147
@@ -138,18 +146,19 @@ class Module(nn.Module):
         self.vocab = vocab
 
         self.pseudo = args.pseudo
-        self.img_shape = 7 * 7 * 3 # This is based off of the Babyai img size
+        self.img_shape = 7 * 7 * (11 + 6 + 3) # This is based off of the Babyai img size
 
         self.embed = nn.Embedding(len(self.vocab), args.demb)
-        self.linear = nn.Linear(args.demb, self.img_shape)
-        self.enc = nn.LSTM(self.img_shape, args.dhid, num_layers=2, batch_first=True)
+        self.linear = nn.Linear(self.img_shape, args.demb)
+        self.lang_enc = nn.LSTM(args.demb, args.dhid, num_layers=2, batch_first=True)
+        self.img_enc = nn.LSTM(args.demb, args.dhid, num_layers=2, batch_first=True)
         self.lin_1 = nn.Linear(args.dhid * 4, args.dhid)
         self.lin_2 = nn.Linear(args.dhid, 1)
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         self.to(self.device)
 
-    def encoder(self, batch, batch_size, h_0=None, c_0=None):
+    def language_encoder(self, batch, batch_size, h_0=None, c_0=None):
         '''
         Encodes a stacked tensor.
         '''
@@ -157,7 +166,21 @@ class Module(nn.Module):
         if h_0 is None or c_0 is None:
             h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
             c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
-        out, (h, c) = self.enc(batch, (h_0, c_0)) # -> M x B x H
+        out, (h, c) = self.lang_enc(batch, (h_0, c_0)) # -> M x B x H
+
+        hid_sum = torch.transpose(h, 0, 1).reshape(batch_size, -1)
+
+        return hid_sum, h, c
+
+    def image_encoder(self, batch, batch_size, h_0=None, c_0=None):
+        '''
+        Encodes a stacked tensor.
+        '''
+
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+        out, (h, c) = self.img_enc(batch, (h_0, c_0)) # -> M x B x H
 
         hid_sum = torch.transpose(h, 0, 1).reshape(batch_size, -1)
 
@@ -172,13 +195,13 @@ class Module(nn.Module):
 
         ### High ###
         high = self.embed(high) # -> B x M x D
-        high = self.linear(high) # -> B x M x 147
         high = pack_padded_sequence(high, high_lens, batch_first=True, enforce_sorted=False)
-        high, _, _ = self.encoder(high, B) # -> B x H
+        high, _, _ = self.language_encoder(high, B) # -> B x H
 
         ### Context ###
+        context = self.linear(context)
         context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
-        context, _, _ = self.encoder(context, B) # -> B x H
+        context, _, _ = self.image_encoder(context, B) # -> B x H
 
         ### Combination ###
         combination = torch.stack([torch.cat((high[i].unsqueeze(0).repeat(B, 1), context), dim=1) for i in range(B)]) # -> B x B x 2H
@@ -335,7 +358,7 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/context_lens[b] + target_lens[b]
+                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
                     total_loss += F.mse_loss(output["prediction"][b], progress * correctness_mask)
 
                 loss["total"] += total_loss

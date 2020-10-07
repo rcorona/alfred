@@ -25,6 +25,10 @@ class CPVDataset(Dataset):
         self.data = data
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
 
+        self.object_default = np.array([np.eye(11) for _ in range(49)])
+        self.color_default = np.array([np.eye(6) for _ in range(49)])
+        self.state_default = np.array([np.eye(3) for _ in range(49)])
+
     def featurize(self, ex):
         '''
         Takes in a single data point (defined by the dictionary ex) and featurizes it.
@@ -45,15 +49,13 @@ class CPVDataset(Dataset):
             img_file.close()
 
         final_shape = 7 * 7 * (11 + 6 + 3)
-        object_default = np.array([np.eye(11) for _ in range(49)])
-        color_default = np.array([np.eye(6) for _ in range(49)])
-        state_default = np.array([np.eye(3) for _ in range(49)])
+
 
         imgs = [np.reshape(img, (49, -1)) for img in imgs]
 
-        low_level_object = [torch.tensor(object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in imgs]
-        low_level_color = [torch.tensor(color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in imgs]
-        low_level_state = [torch.tensor(state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in imgs]
+        low_level_object = [torch.tensor(self.object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in imgs]
+        low_level_color = [torch.tensor(self.color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in imgs]
+        low_level_state = [torch.tensor(self.state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in imgs]
 
         low_levels = [torch.cat([low_level_object[i], low_level_color[i], low_level_state[i]], dim=1).reshape(final_shape) for i in range(len(imgs))]
         target_idx = random.randrange(len(low_levels))
@@ -151,8 +153,8 @@ class Module(nn.Module):
 
         self.embed = nn.Embedding(len(self.vocab), args.demb)
         self.linear = nn.Linear(self.img_shape, args.demb)
-        self.lang_enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
-        self.img_enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
+        self.lang_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
+        self.img_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
 
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
@@ -306,7 +308,11 @@ class Module(nn.Module):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
                     progress = context_lens[b]/(context_lens[b] + target_lens[b])
-                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 * progress * correctness_mask)
+                    c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+                    weight_mask = torch.ones((batch_size,)).to(self.device)
+                    weight_mask[b] = batch_size - 1
+                    contrast_loss += torch.dot(c_loss, weight_mask)
+
                 sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
                 equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
                 hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
@@ -419,8 +425,12 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/context_lens[b] + target_lens[b]
-                    contrast_loss += F.mse_loss(output["H * C"][b], output["norm(H)"]**2 + progress * correctness_mask)
+                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
+                    c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+                    weight_mask = torch.ones((batch_size,)).to(self.device)
+                    weight_mask[b] = batch_size - 1
+                    contrast_loss += torch.dot(c_loss, weight_mask)
+
                 sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
                 equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
                 hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
@@ -458,7 +468,7 @@ class Module(nn.Module):
             self.writer.add_scalar('PseudoCosineLoss/' + type, (loss["cosine"]/size).item(), epoch)
         else:
             self.writer.add_scalar('Loss/' + type, (loss["total"]/size).item(), epoch)
-            self.writer.add_scalar('ContrastLoss/' + type, (loss["contrast"]/size).item(), epoch)
+            self.writer.add_scalar('Contras tLoss/' + type, (loss["contrast"]/size).item(), epoch)
             self.writer.add_scalar('SumLoss/' + type, (loss["sum"]/size).item(), epoch)
             self.writer.add_scalar('EqualLoss/' + type, (loss["equal"]/size).item(), epoch)
             self.writer.add_scalar('HNormLoss/' + type, (loss["hnorm"]/size).item(), epoch)
