@@ -14,6 +14,7 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from torch.utils.data import Dataset, DataLoader
 from tensorboardX import SummaryWriter
 import torch.multiprocessing
+import pdb
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -228,6 +229,65 @@ class Module(nn.Module):
 
         return output
 
+    def compute_losses(self, batch, loss, pseudo_loss=None): 
+        """
+        Compute losses given a batch during training/eval. 
+
+        batch - The batch to process. 
+        loss - Dict to update with losses. 
+        pseudo_loss - Dict to update with losses (multiple times per epoch). 
+
+        """
+        batch_size = batch["high"].shape[0]
+        high = batch["high"].to(self.device)
+        context = batch["context"].to(self.device)
+        target = batch["target"].to(self.device)
+        high_lens = batch["high_lens"].to(self.device)
+        context_lens = batch["context_lens"].to(self.device)
+        target_lens = batch["target_lens"].to(self.device)
+
+        output = self.forward(high, context, target, high_lens, context_lens, target_lens)
+
+        contrast_loss = 0 # Pixl2r loss
+        for b in range(batch_size):
+
+            correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+            correctness_mask[b] = 1
+            progress = context_lens.float() / (context_lens.float() + target_lens.float())
+            c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+            weight_mask = torch.ones((batch_size,)).to(self.device)
+            weight_mask[b] = batch_size - 1
+            contrast_loss += torch.dot(c_loss, weight_mask)
+
+        sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
+        equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
+        hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        cosine_loss = -output["cos(H, N)"].sum()
+        total_loss = contrast_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss + cosine_loss
+
+        loss["total"] += total_loss
+        loss["contrast"] += contrast_loss
+        loss["sum"] += sum_loss
+        loss["equal"] += equal_loss
+        loss["hnorm"] += hnorm_loss
+        loss["cnorm"] += cnorm_loss
+        loss["tnorm"] += tnorm_loss
+        loss["cosine"] += cosine_loss
+        
+        if pseudo_loss: 
+            pseudo_loss["total"] += total_loss
+            pseudo_loss["contrast"] += contrast_loss
+            pseudo_loss["sum"] += sum_loss
+            pseudo_loss["equal"] += equal_loss
+            pseudo_loss["hnorm"] += hnorm_loss
+            pseudo_loss["cnorm"] += cnorm_loss
+            pseudo_loss["tnorm"] += tnorm_loss
+            pseudo_loss["cosine"] += cosine_loss
+
+        return total_loss
+
     def run_train(self, splits, optimizer, args=None):
         '''
         '''
@@ -285,58 +345,21 @@ class Module(nn.Module):
                 }
                 batch_idx = 0
                 pseudo_size = torch.tensor(0, dtype=torch.float)
+            else: 
+                pseudo_loss = None
 
             self.train()
 
             for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
 
-                batch_size = batch["high"].shape[0]
-                size += batch_size
-                pseudo_size += batch_size
-                high = batch["high"].to(self.device)
-                context = batch["context"].to(self.device)
-                target = batch["target"].to(self.device)
-                high_lens = batch["high_lens"].to(self.device)
-                context_lens = batch["context_lens"].to(self.device)
-                target_lens = batch["target_lens"].to(self.device)
-
-                output = self.forward(high, context, target, high_lens, context_lens, target_lens)
-
-                contrast_loss = 0 # Pixl2r loss
-                for b in range(batch_size):
-                    correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
-                    correctness_mask[b] = 1
-                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
-                    c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
-                    weight_mask = torch.ones((batch_size,)).to(self.device)
-                    weight_mask[b] = batch_size - 1
-                    contrast_loss += torch.dot(c_loss, weight_mask)
-
-                sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
-                equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
-                hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                cosine_loss = -output["cos(H, N)"].sum()
-                total_loss = contrast_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss + cosine_loss
-
-                loss["total"] += total_loss
-                loss["contrast"] += contrast_loss
-                loss["sum"] += sum_loss
-                loss["equal"] += equal_loss
-                loss["hnorm"] += hnorm_loss
-                loss["cnorm"] += cnorm_loss
-                loss["tnorm"] += tnorm_loss
-                loss["cosine"] += cosine_loss
-                pseudo_loss["total"] += total_loss
-                pseudo_loss["contrast"] += contrast_loss
-                pseudo_loss["sum"] += sum_loss
-                pseudo_loss["equal"] += equal_loss
-                pseudo_loss["hnorm"] += hnorm_loss
-                pseudo_loss["cnorm"] += cnorm_loss
-                pseudo_loss["tnorm"] += tnorm_loss
-                pseudo_loss["cosine"] += cosine_loss
+                # Process batch for losses and update dicts. 
+                size += batch['high'].shape[0]
+                
+                if self.pseudo: 
+                    pseudo_size += batch['high'].shape[0]
+                
+                total_loss = self.compute_losses(batch, loss, pseudo_loss)
 
                 total_loss.backward()
                 optimizer.step()
@@ -410,43 +433,10 @@ class Module(nn.Module):
 
         with torch.no_grad():
             for batch in loader:
-                batch_size = batch["high"].shape[0]
-                size += batch_size
-                high = batch["high"].to(self.device)
-                context = batch["context"].to(self.device)
-                target = batch["target"].to(self.device)
-                high_lens = batch["high_lens"].to(self.device)
-                context_lens = batch["context_lens"].to(self.device)
-                target_lens = batch["target_lens"].to(self.device)
 
-                output = self.forward(high, context, target, high_lens, context_lens, target_lens)
-
-                contrast_loss = 0 # Pixl2r loss
-                for b in range(batch_size):
-                    correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
-                    correctness_mask[b] = 1
-                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
-                    c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
-                    weight_mask = torch.ones((batch_size,)).to(self.device)
-                    weight_mask[b] = batch_size - 1
-                    contrast_loss += torch.dot(c_loss, weight_mask)
-
-                sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
-                equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
-                hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-                cosine_loss = -output["cos(H, N)"].sum()
-                total_loss = contrast_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss + cosine_loss
-
-                loss["total"] += total_loss
-                loss["contrast"] += contrast_loss
-                loss["sum"] += sum_loss
-                loss["equal"] += equal_loss
-                loss["hnorm"] += hnorm_loss
-                loss["cnorm"] += cnorm_loss
-                loss["tnorm"] += tnorm_loss
-                loss["cosine"] += cosine_loss
+                # Update loss dict. 
+                size += batch['high'].shape[0]
+                _ = self.compute_losses(batch, loss)
 
         self.write(loss, size, epoch, train=False, pseudo=pseudo)
         return loss
