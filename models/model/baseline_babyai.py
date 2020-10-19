@@ -280,8 +280,11 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
-                    total_loss += F.mse_loss(output["prediction"][b], progress * correctness_mask) # Reduction == None, multiply correct MSE by batch - 1
+                    progress = context_lens.float()/(context_lens.float() + target_lens.float())
+                    c_loss = F.mse_loss(output["prediction"][b], progress * correctness_mask, reduction='none')
+                    weight_mask = torch.ones((batch_size,)).to(self.device)
+                    weight_mask[b] = batch_size - 1
+                    contrast_loss += torch.dot(c_loss, weight_mask)
 
                 loss["total"] += total_loss
                 pseudo_loss["total"] += total_loss
@@ -358,8 +361,11 @@ class Module(nn.Module):
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
-                    progress = context_lens[b]/(context_lens[b] + target_lens[b])
-                    total_loss += F.mse_loss(output["prediction"][b], progress * correctness_mask)
+                    progress = context_lens.float()/(context_lens.float() + target_lens.float())
+                    c_loss = F.mse_loss(output["prediction"][b], progress * correctness_mask, reduction='none')
+                    weight_mask = torch.ones((batch_size,)).to(self.device)
+                    weight_mask[b] = batch_size - 1
+                    contrast_loss += torch.dot(c_loss, weight_mask)
 
                 loss["total"] += total_loss
 
