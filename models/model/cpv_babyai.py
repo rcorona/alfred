@@ -2,6 +2,7 @@ import os
 import random
 import collections
 import json
+import revtok
 import numpy as np
 import tqdm
 import sklearn.metrics
@@ -19,7 +20,7 @@ import pdb
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 class CPVDataset(Dataset):
-    def __init__(self, args, data):
+    def __init__(self, args, vocab, data):
         self.pad = 0
         self.seg = 1
         self.args = args
@@ -29,6 +30,13 @@ class CPVDataset(Dataset):
         self.object_default = np.array([np.eye(11) for _ in range(49)])
         self.color_default = np.array([np.eye(6) for _ in range(49)])
         self.state_default = np.array([np.eye(3) for _ in range(49)])
+
+        then_merge = vocab.word2index([",", "then"], train=False)
+        and_merge = vocab.word2index(["and"], train=False)
+        after_merge = vocab.word2index(["after", "you"], train=False)
+
+        self.merges = [then_merge, and_merge, after_merge]
+
 
     def featurize(self, ex):
         '''
@@ -79,6 +87,11 @@ class CPVDataset(Dataset):
 
         return {"high" : high_level, "context": padded_context, "target": padded_target}
 
+    def merge_highs(self, high_1, high_2):
+        merge = torch.tensor(self.merges[random.randrange(3)])
+        return torch.cat([high_1, merge, high_2], dim=0)
+
+
     def __getitem__(self, idx):
         '''
         Returns the featurized data point at index idx.
@@ -119,6 +132,8 @@ class CPVDataset(Dataset):
             context_lens = []
             target = []
             target_lens = []
+            merged = []
+            merged_lens = []
 
             for idx in range(batch_size):
                 high.append(batch[idx]["high"])
@@ -127,6 +142,13 @@ class CPVDataset(Dataset):
                 context_lens.append(batch[idx]["context"].shape[0])
                 target.append(batch[idx]["target"])
                 target_lens.append(batch[idx]["target"].shape[0])
+                h1 = batch[idx]["high"]
+                for jdx in range(batch_size):
+                    h2 = batch[jdx]["high"]
+                    m = self.merge_highs(h1, h2)
+                    merged.append(m)
+                    merged_lens.append(m.shape[0])
+
 
             high = pad_sequence(high, batch_first=True) # -> B x M
             high_lens = torch.tensor(high_lens) # -> B
@@ -135,8 +157,20 @@ class CPVDataset(Dataset):
             target = pad_sequence(target, batch_first=True) # B x T x 147
             target_lens = torch.tensor(target_lens) # -> B
             labels = torch.tensor([*range(batch_size)]) # -> B
+            merged = pad_sequence(merged, batch_first=True) # -> B x 2M
+            merged_lens = torch.tensor(merged_lens) # -> B
 
-            return {"high": high, "high_lens": high_lens, "context": context, "context_lens": context_lens, "target": target, "target_lens": target_lens, "labels": labels}
+            return {
+                "high": high,
+                "high_lens": high_lens,
+                "context": context,
+                "context_lens": context_lens,
+                "target": target,
+                "target_lens": target_lens,
+                "merged": merged,
+                "merged_lens": merged_lens,
+                "labels": labels
+            }
         return collate
 
 
@@ -189,7 +223,7 @@ class Module(nn.Module):
 
         return hid_sum, h, c
 
-    def forward(self, high, context, target, high_lens, context_lens, target_lens):
+    def forward(self, high, context, target, merged, high_lens, context_lens, target_lens, merged_lens):
         '''
 
         '''
@@ -214,6 +248,14 @@ class Module(nn.Module):
         ### Full Trajectory ###
         trajectory, _, _ = self.image_encoder(packed_target, B, h, c)
 
+        ### Merged Highs ###
+        merged = self.embed(merged)
+        merged = pack_padded_sequence(merged, merged_lens, batch_first=True, enforce_sorted=False)
+        merged, _, _ = self.language_encoder(merged, B * B)
+
+        summed = torch.einsum('ik, jk -> ijk', high, high)
+        summed = torch.reshape(summed, (B * B, -1))
+
         ### Combinations ###
         output = {}
         output["H * C"] = torch.matmul(high, torch.transpose(context, 0, 1)) # -> B x B
@@ -226,65 +268,72 @@ class Module(nn.Module):
         output["norm(T)"] = torch.norm(target, dim=1) # -> B
         output["norm(N)"] = torch.norm(trajectory, dim=1) # -> B
         output["cos(H, N)"] = F.cosine_similarity(high, trajectory) # -> B
+        output["H12"] = merged
+        output["H1 + H2"] = summed
 
         return output
 
-    def compute_losses(self, batch, loss, pseudo_loss=None): 
+    def compute_losses(self, batch, loss, pseudo_loss=None):
         """
-        Compute losses given a batch during training/eval. 
+        Compute losses given a batch during training/eval.
 
-        batch - The batch to process. 
-        loss - Dict to update with losses. 
-        pseudo_loss - Dict to update with losses (multiple times per epoch). 
+        batch - The batch to process.
+        loss - Dict to update with losses.
+        pseudo_loss - Dict to update with losses (multiple times per epoch).
 
         """
         batch_size = batch["high"].shape[0]
         high = batch["high"].to(self.device)
         context = batch["context"].to(self.device)
         target = batch["target"].to(self.device)
+        merged = batch["merged"].to(self.device)
         high_lens = batch["high_lens"].to(self.device)
         context_lens = batch["context_lens"].to(self.device)
         target_lens = batch["target_lens"].to(self.device)
+        merged_lens = batch["merged_lens"].to(self.device)
 
-        output = self.forward(high, context, target, high_lens, context_lens, target_lens)
+        output = self.forward(high, context, target, merged, high_lens, context_lens, target_lens, merged_lens)
 
         contrast_loss = 0 # Pixl2r loss
         for b in range(batch_size):
-
             correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
             correctness_mask[b] = 1
             progress = context_lens.float() / (context_lens.float() + target_lens.float())
-            c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+            # c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+            c_loss = F.mse_loss(output["H * C"][b], progress * correctness_mask, reduction='none')
             weight_mask = torch.ones((batch_size,)).to(self.device)
             weight_mask[b] = batch_size - 1
             contrast_loss += torch.dot(c_loss, weight_mask)
 
-        sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2) * self.args.lbda
+        sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2)
         equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
-        hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-        cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-        tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
-        cosine_loss = -output["cos(H, N)"].sum()
-        total_loss = contrast_loss + sum_loss + equal_loss + hnorm_loss + cnorm_loss + tnorm_loss + cosine_loss
+        generalizing_loss = F.mse_loss(output["H1 + H2"], output["H12"])
+        # hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        # cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        # tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
+        # cosine_loss = -output["cos(H, N)"].sum()
+        total_loss = contrast_loss + sum_loss + equal_loss + generalizing_loss
 
         loss["total"] += total_loss
         loss["contrast"] += contrast_loss
         loss["sum"] += sum_loss
         loss["equal"] += equal_loss
-        loss["hnorm"] += hnorm_loss
-        loss["cnorm"] += cnorm_loss
-        loss["tnorm"] += tnorm_loss
-        loss["cosine"] += cosine_loss
-        
-        if pseudo_loss: 
+        loss["generalizing"] += generalizing_loss
+        # loss["hnorm"] += hnorm_loss
+        # loss["cnorm"] += cnorm_loss
+        # loss["tnorm"] += tnorm_loss
+        # loss["cosine"] += cosine_loss
+
+        if pseudo_loss:
             pseudo_loss["total"] += total_loss
             pseudo_loss["contrast"] += contrast_loss
             pseudo_loss["sum"] += sum_loss
             pseudo_loss["equal"] += equal_loss
-            pseudo_loss["hnorm"] += hnorm_loss
-            pseudo_loss["cnorm"] += cnorm_loss
-            pseudo_loss["tnorm"] += tnorm_loss
-            pseudo_loss["cosine"] += cosine_loss
+            pseudo_loss["generalizing"] += generalizing_loss
+            # pseudo_loss["hnorm"] += hnorm_loss
+            # pseudo_loss["cnorm"] += cnorm_loss
+            # pseudo_loss["tnorm"] += tnorm_loss
+            # pseudo_loss["cosine"] += cosine_loss
 
         return total_loss
 
@@ -294,7 +343,7 @@ class Module(nn.Module):
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs/babyai_cpv_with_cnn')
+        self.writer = SummaryWriter('runs_2/cpv_babyai')
         fsave = os.path.join(args.dout, 'best.pth')
         psave = os.path.join(args.dout, 'pseudo_best.pth')
 
@@ -303,8 +352,8 @@ class Module(nn.Module):
         with open(splits['valid'], 'r') as file:
             valid_data = json.load(file)
 
-        valid_dataset = CPVDataset(self.args, valid_data)
-        train_dataset = CPVDataset(self.args, train_data)
+        valid_dataset = CPVDataset(self.args, self.vocab, valid_data)
+        train_dataset = CPVDataset(self.args, self.vocab, train_data)
         valid_loader = DataLoader(valid_dataset, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=valid_dataset.collate_gen())
         train_loader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=train_dataset.collate_gen())
 
@@ -328,7 +377,8 @@ class Module(nn.Module):
                 "hnorm": torch.tensor(0, dtype=torch.float),
                 "cnorm": torch.tensor(0, dtype=torch.float),
                 "tnorm": torch.tensor(0, dtype=torch.float),
-                "cosine": torch.tensor(0, dtype=torch.float)
+                "cosine": torch.tensor(0, dtype=torch.float),
+                "generalizing": torch.tensor(0, dtype=torch.float)
             }
             size = torch.tensor(0, dtype=torch.float)
 
@@ -341,11 +391,12 @@ class Module(nn.Module):
                     "hnorm": torch.tensor(0, dtype=torch.float),
                     "cnorm": torch.tensor(0, dtype=torch.float),
                     "tnorm": torch.tensor(0, dtype=torch.float),
-                    "cosine": torch.tensor(0, dtype=torch.float)
+                    "cosine": torch.tensor(0, dtype=torch.float),
+                    "generalizing": torch.tensor(0, dtype=torch.float)
                 }
                 batch_idx = 0
                 pseudo_size = torch.tensor(0, dtype=torch.float)
-            else: 
+            else:
                 pseudo_loss = None
 
             self.train()
@@ -353,12 +404,12 @@ class Module(nn.Module):
             for batch in tqdm.tqdm(train_loader, desc=desc_train):
                 optimizer.zero_grad()
 
-                # Process batch for losses and update dicts. 
+                # Process batch for losses and update dicts.
                 size += batch['high'].shape[0]
-                
-                if self.pseudo: 
+
+                if self.pseudo:
                     pseudo_size += batch['high'].shape[0]
-                
+
                 total_loss = self.compute_losses(batch, loss, pseudo_loss)
 
                 total_loss.backward()
@@ -421,7 +472,8 @@ class Module(nn.Module):
             "hnorm": torch.tensor(0, dtype=torch.float),
             "cnorm": torch.tensor(0, dtype=torch.float),
             "tnorm": torch.tensor(0, dtype=torch.float),
-            "cosine": torch.tensor(0, dtype=torch.float)
+            "cosine": torch.tensor(0, dtype=torch.float),
+            "generalizing": torch.tensor(0, dtype=torch.float)
         }
 
         size = torch.tensor(0, dtype=torch.float)
@@ -434,7 +486,7 @@ class Module(nn.Module):
         with torch.no_grad():
             for batch in loader:
 
-                # Update loss dict. 
+                # Update loss dict.
                 size += batch['high'].shape[0]
                 _ = self.compute_losses(batch, loss)
 
@@ -447,7 +499,7 @@ class Module(nn.Module):
             type = "train"
         else:
             type = "valid"
-        if self.pseudo:
+        if pseudo:
             self.writer.add_scalar('PseudoLoss/' + type, (loss["total"]/size).item(), epoch)
             self.writer.add_scalar('PseudoContrastLoss/' + type, (loss["contrast"]/size).item(), epoch)
             self.writer.add_scalar('PseudoSumLoss/' + type, (loss["sum"]/size).item(), epoch)
@@ -456,12 +508,14 @@ class Module(nn.Module):
             self.writer.add_scalar('PseudoCNormLoss/' + type, (loss["cnorm"]/size).item(), epoch)
             self.writer.add_scalar('PseudoTNormLoss/' + type, (loss["tnorm"]/size).item(), epoch)
             self.writer.add_scalar('PseudoCosineLoss/' + type, (loss["cosine"]/size).item(), epoch)
+            self.writer.add_scalar('PseudoGeneralizingLoss/' + type, (loss["generalizing"]/size).item(), epoch)
         else:
             self.writer.add_scalar('Loss/' + type, (loss["total"]/size).item(), epoch)
-            self.writer.add_scalar('Contras tLoss/' + type, (loss["contrast"]/size).item(), epoch)
+            self.writer.add_scalar('ContrastLoss/' + type, (loss["contrast"]/size).item(), epoch)
             self.writer.add_scalar('SumLoss/' + type, (loss["sum"]/size).item(), epoch)
             self.writer.add_scalar('EqualLoss/' + type, (loss["equal"]/size).item(), epoch)
             self.writer.add_scalar('HNormLoss/' + type, (loss["hnorm"]/size).item(), epoch)
             self.writer.add_scalar('CNormLoss/' + type, (loss["cnorm"]/size).item(), epoch)
             self.writer.add_scalar('TNormLoss/' + type, (loss["tnorm"]/size).item(), epoch)
             self.writer.add_scalar('CosineLoss/' + type, (loss["cosine"]/size).item(), epoch)
+            self.writer.add_scalar('GeneralizingLoss/' + type, (loss["generalizing"]/size).item(), epoch)

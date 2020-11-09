@@ -199,17 +199,19 @@ class Module(nn.Module):
         high, _, _ = self.language_encoder(high, B) # -> B x H
 
         ### Context ###
-        context = self.linear(context)
+        context = self.linear(context) # B x N x S
         context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
         context, _, _ = self.image_encoder(context, B) # -> B x H
 
         ### Combination ###
         combination = torch.stack([torch.cat((high[i].unsqueeze(0).repeat(B, 1), context), dim=1) for i in range(B)]) # -> B x B x 2H
+        print(combination.shape)
         combination = self.lin_1(combination) # -> B x B x 10H
         combination = F.relu(combination) # -> B x B x 10H
         combination = self.lin_2(combination).squeeze() # -> B x B
         combination = F.tanh(combination) # -> B x B
-
+        print(torch.max(combination))
+        print(torch.min(combination))
         output = {}
         output["prediction"] = combination
 
@@ -248,12 +250,16 @@ class Module(nn.Module):
             desc_valid = "Epoch " + str(epoch) + ", valid"
 
             loss = {
+                "correct": torch.tensor(0, dtype=torch.float),
+                "incorrect": torch.tensor(0, dtype=torch.float),
                 "total": torch.tensor(0, dtype=torch.float)
             }
             size = torch.tensor(0, dtype=torch.float)
 
             if self.pseudo:
                 pseudo_loss = {
+                    "correct": torch.tensor(0, dtype=torch.float),
+                    "incorrect": torch.tensor(0, dtype=torch.float),
                     "total": torch.tensor(0, dtype=torch.float)
                 }
                 batch_idx = 0
@@ -277,6 +283,8 @@ class Module(nn.Module):
                 output = self.forward(high, context, high_lens, context_lens)
 
                 total_loss = 0
+                correct_loss = 0
+                incorrect_loss = 0
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
@@ -284,10 +292,16 @@ class Module(nn.Module):
                     c_loss = F.mse_loss(output["prediction"][b], progress * correctness_mask, reduction='none')
                     weight_mask = torch.ones((batch_size,)).to(self.device)
                     weight_mask[b] = batch_size - 1
-                    contrast_loss += torch.dot(c_loss, weight_mask)
+                    correct_loss += c_loss[b]
+                    incorrect_loss += torch.sum(c_loss) - c_loss[b]
+                    total_loss += torch.dot(c_loss, weight_mask)
 
                 loss["total"] += total_loss
+                loss["correct"] += correct_loss
+                loss["incorrect"] += incorrect_loss
                 pseudo_loss["total"] += total_loss
+                pseudo_loss["correct"] += correct_loss
+                pseudo_loss["incorrect"] += incorrect_loss
 
                 total_loss.backward()
                 optimizer.step()
@@ -301,6 +315,8 @@ class Module(nn.Module):
                     batch_idx = -1
                     pseudo_size = torch.tensor(0, dtype=torch.float)
                     pseudo_loss["total"] = torch.tensor(0, dtype=torch.float)
+                    pseudo_loss["correct"] = torch.tensor(0, dtype=torch.float)
+                    pseudo_loss["incorrect"] = torch.tensor(0, dtype=torch.float)
                     torch.save({
                         'model': self.state_dict(),
                         'optim': optimizer.state_dict(),
@@ -334,6 +350,8 @@ class Module(nn.Module):
     def run_valid(self, valid_loader, epoch, pseudo=False, desc_valid=None):
         self.eval()
         loss = {
+            "correct": torch.tensor(0, dtype=torch.float),
+            "incorrect": torch.tensor(0, dtype=torch.float),
             "total": torch.tensor(0, dtype=torch.float)
         }
 
@@ -358,6 +376,8 @@ class Module(nn.Module):
                 output = self.forward(high, context, high_lens, context_lens)
 
                 total_loss = 0
+                correct_loss = 0
+                incorrect_loss = 0
                 for b in range(batch_size):
                     correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
                     correctness_mask[b] = 1
@@ -365,9 +385,13 @@ class Module(nn.Module):
                     c_loss = F.mse_loss(output["prediction"][b], progress * correctness_mask, reduction='none')
                     weight_mask = torch.ones((batch_size,)).to(self.device)
                     weight_mask[b] = batch_size - 1
-                    contrast_loss += torch.dot(c_loss, weight_mask)
+                    correct_loss += c_loss[b] * (batch_size-1)
+                    incorrect_loss += torch.sum(c_loss) - c_loss[b]
+                    total_loss += torch.dot(c_loss, weight_mask)
 
                 loss["total"] += total_loss
+                loss["correct"] += correct_loss
+                loss["incorrect"] += incorrect_loss
 
         self.write(loss, size, epoch, train=False, pseudo=pseudo)
         return loss
@@ -378,7 +402,11 @@ class Module(nn.Module):
             type = "train"
         else:
             type = "valid"
-        if self.pseudo:
+        if pseudo:
             self.writer.add_scalar('PseudoLoss/' + type, (loss["total"]/size).item(), epoch)
+            self.writer.add_scalar('PseudoCorrect/' + type, (loss["correct"]/size).item(), epoch)
+            self.writer.add_scalar('PseudoIncorrect/' + type, (loss["incorrect"]/size).item(), epoch)
         else:
             self.writer.add_scalar('Loss/' + type, (loss["total"]/size).item(), epoch)
+            self.writer.add_scalar('Correct/' + type, (loss["correct"]/size).item(), epoch)
+            self.writer.add_scalar('Incorrect/' + type, (loss["incorrect"]/size).item(), epoch)
