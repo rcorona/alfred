@@ -72,6 +72,8 @@ class CPVDataset(Dataset):
         low_level_target = low_levels[target_idx:] # -> T x 147
         low_level_context = low_levels[:target_idx] # -> N x 147
 
+        action = torch.tensor(data['act_idx'][target_idx])
+
         if len(low_level_context) == 0:
             padded_context = torch.tensor([[self.pad for x in range(final_shape)]], dtype=torch.float)
         else:
@@ -83,13 +85,17 @@ class CPVDataset(Dataset):
             padded_target = torch.stack(low_level_target, dim=0) # -> N x 147
 
         high_level = torch.tensor(data['num_instr'])
+        next = low_level_target[0]
 
 
-        return {"high" : high_level, "context": padded_context, "target": padded_target}
+        return {"high" : high_level, "context": padded_context, "target": padded_target, "next": next, "action": action}
 
     def merge_highs(self, high_1, high_2):
         merge = torch.tensor(self.merges[random.randrange(3)])
         return torch.cat([high_1, merge, high_2], dim=0)
+
+    def merge_lows(self, low_1, low_2):
+        return torch.cat([low_1, low_2], dim=0)
 
 
     def __getitem__(self, idx):
@@ -134,6 +140,11 @@ class CPVDataset(Dataset):
             target_lens = []
             merged = []
             merged_lens = []
+            merged_img = []
+            merged_img_lens = []
+            actions = []
+
+            l1 = self.merge_lows(batch[0]["context"], batch[0]["target"])
 
             for idx in range(batch_size):
                 high.append(batch[idx]["high"])
@@ -142,12 +153,24 @@ class CPVDataset(Dataset):
                 context_lens.append(batch[idx]["context"].shape[0])
                 target.append(batch[idx]["target"])
                 target_lens.append(batch[idx]["target"].shape[0])
-                h1 = batch[idx]["high"]
-                for jdx in range(batch_size):
-                    h2 = batch[jdx]["high"]
-                    m = self.merge_highs(h1, h2)
-                    merged.append(m)
-                    merged_lens.append(m.shape[0])
+
+
+                if self.args.imitation_loss:
+                    actions.append(batch[idx]["action"])
+
+                if self.args.generalizing_loss:
+                    h1 = batch[idx]["high"]
+                    l2 = self.merge_lows(batch[idx]["context"], batch[idx]["target"])
+                    m_img = self.merge_lows(l1, l2)
+                    merged_img.append(m_img)
+                    merged_img_lens.append(m_img.shape[0])
+
+                    for jdx in range(batch_size):
+                        h2 = batch[jdx]["high"]
+                        l2 = self.merge_lows(batch[jdx]["context"], batch[jdx]["target"])
+                        m = self.merge_highs(h1, h2)
+                        merged.append(m)
+                        merged_lens.append(m.shape[0])
 
 
             high = pad_sequence(high, batch_first=True) # -> B x M
@@ -157,8 +180,14 @@ class CPVDataset(Dataset):
             target = pad_sequence(target, batch_first=True) # B x T x 147
             target_lens = torch.tensor(target_lens) # -> B
             labels = torch.tensor([*range(batch_size)]) # -> B
-            merged = pad_sequence(merged, batch_first=True) # -> B x 2M
-            merged_lens = torch.tensor(merged_lens) # -> B
+            if self.args.generalizing_loss:
+                merged = pad_sequence(merged, batch_first=True) # -> B x 2M
+                merged_lens = torch.tensor(merged_lens) # -> B
+                merged_img = pad_sequence(merged_img, batch_first=True) # -> B x 2M
+                merged_img_lens = torch.tensor(merged_img_lens) # -> B
+            if self.args.imitation_loss:
+                actions = torch.tensor(actions)
+
 
             return {
                 "high": high,
@@ -169,6 +198,9 @@ class CPVDataset(Dataset):
                 "target_lens": target_lens,
                 "merged": merged,
                 "merged_lens": merged_lens,
+                "merged_img": merged_img,
+                "merged_img_lens": merged_img_lens,
+                "actions": actions,
                 "labels": labels
             }
         return collate
@@ -185,12 +217,16 @@ class Module(nn.Module):
 
         self.pseudo = args.pseudo
         self.img_shape = 7 * 7 * (11 + 6 + 3) # This is based off of the Babyai img size
+        self.num_actions = 7
 
         self.embed = nn.Embedding(len(self.vocab), args.demb)
         self.linear = nn.Linear(self.img_shape, args.demb)
         self.lang_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
         self.img_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
+        self.obs_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
 
+        self.im_linear_1 =  nn.Linear(args.dhid * 2, args.demb)
+        self.im_linear_2 =  nn.Linear(args.demb, self.num_actions)
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
         self.to(self.device)
@@ -223,7 +259,21 @@ class Module(nn.Module):
 
         return hid_sum, h, c
 
-    def forward(self, high, context, target, merged, high_lens, context_lens, target_lens, merged_lens):
+    def observation_encoder(self, batch, batch_size, h_0=None, c_0=None):
+        '''
+        Encodes a stacked tensor.
+        '''
+
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+        out, (h, c) = self.obs_enc(batch, (h_0, c_0)) # -> 2 x B x H
+
+        hid_sum = torch.sum(h, dim=0) # -> B x H
+
+        return hid_sum, h, c
+
+    def forward(self, high, context, target, merged, merged_img, high_lens, context_lens, target_lens, merged_lens, merged_img_lens):
         '''
 
         '''
@@ -237,8 +287,8 @@ class Module(nn.Module):
 
         ### Context ###
         context = self.linear(context)
-        context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
-        context, h, c = self.image_encoder(context, B)
+        packed_context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
+        context, h, c = self.image_encoder(packed_context, B)
 
         ### Target ###
         target = self.linear(target)
@@ -248,13 +298,36 @@ class Module(nn.Module):
         ### Full Trajectory ###
         trajectory, _, _ = self.image_encoder(packed_target, B, h, c)
 
-        ### Merged Highs ###
-        merged = self.embed(merged)
-        merged = pack_padded_sequence(merged, merged_lens, batch_first=True, enforce_sorted=False)
-        merged, _, _ = self.language_encoder(merged, B * B)
+        if self.args.generalizing_loss:
+            ### Merged Highs ###
+            merged = self.embed(merged)
+            merged = pack_padded_sequence(merged, merged_lens, batch_first=True, enforce_sorted=False)
+            merged, _, _ = self.language_encoder(merged, B * B)
 
-        summed = torch.einsum('ik, jk -> ijk', high, high)
-        summed = torch.reshape(summed, (B * B, -1))
+            summed = torch.einsum('ik, jk -> ijk', high, high)
+            summed = torch.reshape(summed, (B * B, -1))
+
+            ### Merged Lows ###
+            merged_img = self.linear(merged_img)
+            merged_img = pack_padded_sequence(merged_img, merged_img_lens, batch_first=True, enforce_sorted=False)
+            merged_img, _, _ = self.image_encoder(merged_img, B)
+
+            summed_img = trajectory[0].unsqueeze(0).repeat(B, 1) + trajectory
+
+        if self.args.imitation_loss:
+            ## plan -> high - context
+            plan = high - context
+            ## current -> Put context trajectory through a different lstm
+            current, _, _ = self.observation_encoder(packed_context, B)
+            ## state -> concat plan and current
+            state = torch.cat([plan, current], dim=1)
+            ## put state through ff
+            state = self.im_linear_1(state)
+            state = F.relu(state)
+            state = self.im_linear_2(state)
+
+
+
 
         ### Combinations ###
         output = {}
@@ -268,8 +341,13 @@ class Module(nn.Module):
         output["norm(T)"] = torch.norm(target, dim=1) # -> B
         output["norm(N)"] = torch.norm(trajectory, dim=1) # -> B
         output["cos(H, N)"] = F.cosine_similarity(high, trajectory) # -> B
-        output["H12"] = merged
-        output["H1 + H2"] = summed
+        if self.args.generalizing_loss:
+            output["H12"] = merged
+            output["H1 + H2"] = summed
+            output["T12"] = merged_img
+            output["T1 + T2"] = summed_img
+        if self.args.imitation_loss:
+            output["At+1"] = state
 
         return output
 
@@ -286,17 +364,28 @@ class Module(nn.Module):
         high = batch["high"].to(self.device)
         context = batch["context"].to(self.device)
         target = batch["target"].to(self.device)
-        merged = batch["merged"].to(self.device)
         high_lens = batch["high_lens"].to(self.device)
         context_lens = batch["context_lens"].to(self.device)
         target_lens = batch["target_lens"].to(self.device)
-        merged_lens = batch["merged_lens"].to(self.device)
 
-        output = self.forward(high, context, target, merged, high_lens, context_lens, target_lens, merged_lens)
+        if self.args.imitation_loss:
+            actions = batch["actions"].to(self.device)
+
+        if self.args.generalizing_loss:
+            merged = batch["merged"].to(self.device)
+            merged_img = batch["merged_img"].to(self.device)
+            merged_lens = batch["merged_lens"].to(self.device)
+            merged_img_lens = batch["merged_img_lens"].to(self.device)
+            output = self.forward(high, context, target, merged, merged_img, high_lens, context_lens, target_lens, merged_lens, merged_img_lens)
+        else:
+            output = self.forward(high, context, target, None, None, high_lens, context_lens, target_lens, None, None)
 
         contrast_loss = 0 # Pixl2r loss
         for b in range(batch_size):
-            correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+            if self.args.negative_contrast:
+                correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+            else:
+                correctness_mask = torch.zeros((batch_size,)).to(self.device)
             correctness_mask[b] = 1
             progress = context_lens.float() / (context_lens.float() + target_lens.float())
             # c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
@@ -307,18 +396,32 @@ class Module(nn.Module):
 
         sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2)
         equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
-        generalizing_loss = F.mse_loss(output["H1 + H2"], output["H12"])
+
+        total_loss = sum_loss + equal_loss + contrast_loss
+
+        if self.args.generalizing_loss:
+            generalizing_loss = F.mse_loss(output["H1 + H2"], output["H12"]) + F.mse_loss(output["T1 + T2"], output["T12"])
+            total_loss += generalizing_loss
+            loss["generalizing"] += generalizing_loss
+            if pseudo_loss:
+                pseudo_loss["generalizing"] += generalizing_loss
+        if self.args.imitation_loss:
+            imitation_loss = F.cross_entropy(output["At+1"], actions)
+            total_loss += imitation_loss
+            loss["imitation"] += imitation_loss
+            if pseudo_loss:
+                pseudo_loss["imitation"] += imitation_loss
+
         # hnorm_loss = sum([output["norm(H)"][i] if output["norm(H)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
         # cnorm_loss = sum([output["norm(C)"][i] if output["norm(C)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
         # tnorm_loss = sum([output["norm(T)"][i] if output["norm(T)"][i].item() > torch.tensor(1.) else 0 for i in range(batch_size)]) * self.args.lbda
         # cosine_loss = -output["cos(H, N)"].sum()
-        total_loss = contrast_loss + sum_loss + equal_loss + generalizing_loss
 
         loss["total"] += total_loss
         loss["contrast"] += contrast_loss
         loss["sum"] += sum_loss
         loss["equal"] += equal_loss
-        loss["generalizing"] += generalizing_loss
+
         # loss["hnorm"] += hnorm_loss
         # loss["cnorm"] += cnorm_loss
         # loss["tnorm"] += tnorm_loss
@@ -329,7 +432,7 @@ class Module(nn.Module):
             pseudo_loss["contrast"] += contrast_loss
             pseudo_loss["sum"] += sum_loss
             pseudo_loss["equal"] += equal_loss
-            pseudo_loss["generalizing"] += generalizing_loss
+
             # pseudo_loss["hnorm"] += hnorm_loss
             # pseudo_loss["cnorm"] += cnorm_loss
             # pseudo_loss["tnorm"] += tnorm_loss
@@ -343,7 +446,7 @@ class Module(nn.Module):
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs_2/cpv_babyai')
+        self.writer = SummaryWriter('runs_2/cpv_babyai_nov_12_traj_generalize_one')
         fsave = os.path.join(args.dout, 'best.pth')
         psave = os.path.join(args.dout, 'pseudo_best.pth')
 
@@ -378,7 +481,8 @@ class Module(nn.Module):
                 "cnorm": torch.tensor(0, dtype=torch.float),
                 "tnorm": torch.tensor(0, dtype=torch.float),
                 "cosine": torch.tensor(0, dtype=torch.float),
-                "generalizing": torch.tensor(0, dtype=torch.float)
+                "generalizing": torch.tensor(0, dtype=torch.float),
+                "imitation": torch.tensor(0, dtype=torch.float)
             }
             size = torch.tensor(0, dtype=torch.float)
 
@@ -392,7 +496,8 @@ class Module(nn.Module):
                     "cnorm": torch.tensor(0, dtype=torch.float),
                     "tnorm": torch.tensor(0, dtype=torch.float),
                     "cosine": torch.tensor(0, dtype=torch.float),
-                    "generalizing": torch.tensor(0, dtype=torch.float)
+                    "generalizing": torch.tensor(0, dtype=torch.float),
+                    "imitation": torch.tensor(0, dtype=torch.float)
                 }
                 batch_idx = 0
                 pseudo_size = torch.tensor(0, dtype=torch.float)
@@ -438,6 +543,8 @@ class Module(nn.Module):
                     pseudo_loss["cnorm"] = torch.tensor(0, dtype=torch.float)
                     pseudo_loss["tnorm"] = torch.tensor(0, dtype=torch.float)
                     pseudo_loss["cosine"] = torch.tensor(0, dtype=torch.float)
+                    pseudo_loss["generalizing"] = torch.tensor(0, dtype=torch.float)
+                    pseudo_loss["imitation"] = torch.tensor(0, dtype=torch.float)
 
                 self.train()
                 batch_idx += 1
@@ -509,6 +616,7 @@ class Module(nn.Module):
             self.writer.add_scalar('PseudoTNormLoss/' + type, (loss["tnorm"]/size).item(), epoch)
             self.writer.add_scalar('PseudoCosineLoss/' + type, (loss["cosine"]/size).item(), epoch)
             self.writer.add_scalar('PseudoGeneralizingLoss/' + type, (loss["generalizing"]/size).item(), epoch)
+            self.writer.add_scalar('PseudoImitationLoss/' + type, (loss["imitation"]/size).item(), epoch)
         else:
             self.writer.add_scalar('Loss/' + type, (loss["total"]/size).item(), epoch)
             self.writer.add_scalar('ContrastLoss/' + type, (loss["contrast"]/size).item(), epoch)
@@ -519,3 +627,4 @@ class Module(nn.Module):
             self.writer.add_scalar('TNormLoss/' + type, (loss["tnorm"]/size).item(), epoch)
             self.writer.add_scalar('CosineLoss/' + type, (loss["cosine"]/size).item(), epoch)
             self.writer.add_scalar('GeneralizingLoss/' + type, (loss["generalizing"]/size).item(), epoch)
+            self.writer.add_scalar('ImitationLoss/' + type, (loss["imitation"]/size).item(), epoch)
