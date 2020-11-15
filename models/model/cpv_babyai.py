@@ -67,16 +67,20 @@ class CPVDataset(Dataset):
         low_level_state = [torch.tensor(self.state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in imgs]
 
         low_levels = [torch.cat([low_level_object[i], low_level_color[i], low_level_state[i]], dim=1).reshape(final_shape) for i in range(len(imgs))]
-        target_idx = random.randrange(len(low_levels))
+        target_idx = random.randrange(0, len(low_levels))
         target_length = torch.tensor(len(low_levels) - target_idx)
         low_level_target = low_levels[target_idx:] # -> T x 147
         low_level_context = low_levels[:target_idx] # -> N x 147
 
-        action = torch.tensor(data['act_idx'][target_idx])
+
+
+
 
         if len(low_level_context) == 0:
+            action = torch.tensor(6)
             padded_context = torch.tensor([[self.pad for x in range(final_shape)]], dtype=torch.float)
         else:
+            action = torch.tensor(data['act_idx'][target_idx - 1])
             padded_context = torch.stack(low_level_context, dim=0) # -> N x 147
 
         if len(low_level_target) == 0:
@@ -85,10 +89,9 @@ class CPVDataset(Dataset):
             padded_target = torch.stack(low_level_target, dim=0) # -> N x 147
 
         high_level = torch.tensor(data['num_instr'])
-        next = low_level_target[0]
 
 
-        return {"high" : high_level, "context": padded_context, "target": padded_target, "next": next, "action": action}
+        return {"high" : high_level, "context": padded_context, "target": padded_target, "action": action}
 
     def merge_highs(self, high_1, high_2):
         merge = torch.tensor(self.merges[random.randrange(3)])
@@ -241,7 +244,7 @@ class Module(nn.Module):
             c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
         out, (h, c) = self.lang_enc(batch, (h_0, c_0)) # -> 2 x B x H
 
-        hid_sum = torch.sum(h, dim=0) # -> B x H
+        hid_sum = h[-1].squeeze() # -> B x H
 
         return hid_sum, h, c
 
@@ -255,7 +258,7 @@ class Module(nn.Module):
             c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
         out, (h, c) = self.img_enc(batch, (h_0, c_0)) # -> 2 x B x H
 
-        hid_sum = torch.sum(h, dim=0) # -> B x H
+        hid_sum = h[-1].squeeze() # -> B x H
 
         return hid_sum, h, c
 
@@ -269,7 +272,7 @@ class Module(nn.Module):
             c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
         out, (h, c) = self.obs_enc(batch, (h_0, c_0)) # -> 2 x B x H
 
-        hid_sum = torch.sum(h, dim=0) # -> B x H
+        hid_sum = h[-1].squeeze() # -> B x H
 
         return hid_sum, h, c
 
@@ -325,9 +328,6 @@ class Module(nn.Module):
             state = self.im_linear_1(state)
             state = F.relu(state)
             state = self.im_linear_2(state)
-
-
-
 
         ### Combinations ###
         output = {}
