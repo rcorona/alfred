@@ -51,7 +51,7 @@ if __name__ == '__main__':
     parser.add_argument('--negative_contrast', help='negative correlation', action='store_true')
     parser.add_argument('--generalizing_loss', help='generalization loss', action='store_true')
     parser.add_argument('--imitation_loss', help='imitation loss', action='store_true')
-
+    parser.add_argument('--cpv_loss', help='all cpv loss', action='store_true')
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')

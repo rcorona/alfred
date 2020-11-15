@@ -380,24 +380,36 @@ class Module(nn.Module):
         else:
             output = self.forward(high, context, target, None, None, high_lens, context_lens, target_lens, None, None)
 
-        contrast_loss = 0 # Pixl2r loss
-        for b in range(batch_size):
-            if self.args.negative_contrast:
-                correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
-            else:
-                correctness_mask = torch.zeros((batch_size,)).to(self.device)
-            correctness_mask[b] = 1
-            progress = context_lens.float() / (context_lens.float() + target_lens.float())
-            # c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
-            c_loss = F.mse_loss(output["H * C"][b], progress * correctness_mask, reduction='none')
-            weight_mask = torch.ones((batch_size,)).to(self.device)
-            weight_mask[b] = batch_size - 1
-            contrast_loss += torch.dot(c_loss, weight_mask)
+        total_loss = torch.tensor(0.0).to(self.device)
 
-        sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2)
-        equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
+        if self.args.cpv_loss:
+            contrast_loss = 0 # Pixl2r loss
+            for b in range(batch_size):
+                if self.args.negative_contrast:
+                    correctness_mask = torch.ones((batch_size,)).to(self.device) * -1
+                else:
+                    correctness_mask = torch.zeros((batch_size,)).to(self.device)
+                correctness_mask[b] = 1
+                progress = context_lens.float() / (context_lens.float() + target_lens.float())
+                # c_loss = F.mse_loss(output["H * C"][b], output["norm(H)"][b]**2 * progress * correctness_mask, reduction='none')
+                c_loss = F.mse_loss(output["H * C"][b], progress * correctness_mask, reduction='none')
+                weight_mask = torch.ones((batch_size,)).to(self.device)
+                weight_mask[b] = batch_size - 1
+                contrast_loss += torch.dot(c_loss, weight_mask)
 
-        total_loss = sum_loss + equal_loss + contrast_loss
+
+            sum_loss = F.mse_loss(output["<H, C + T>"], output["norm(H)"]**2)
+            equal_loss = F.mse_loss(output["norm(H)"]**2, output["<H, N>"])
+
+            total_loss += sum_loss + equal_loss + contrast_loss
+            loss["contrast"] += contrast_loss
+            loss["sum"] += sum_loss
+            loss["equal"] += equal_loss
+            if pseudo_loss:
+                pseudo_loss["total"] += total_loss
+                pseudo_loss["contrast"] += contrast_loss
+                pseudo_loss["sum"] += sum_loss
+                pseudo_loss["equal"] += equal_loss
 
         if self.args.generalizing_loss:
             generalizing_loss = F.mse_loss(output["H1 + H2"], output["H12"]) + F.mse_loss(output["T1 + T2"], output["T12"])
@@ -418,9 +430,7 @@ class Module(nn.Module):
         # cosine_loss = -output["cos(H, N)"].sum()
 
         loss["total"] += total_loss
-        loss["contrast"] += contrast_loss
-        loss["sum"] += sum_loss
-        loss["equal"] += equal_loss
+
 
         # loss["hnorm"] += hnorm_loss
         # loss["cnorm"] += cnorm_loss
@@ -429,9 +439,7 @@ class Module(nn.Module):
 
         if pseudo_loss:
             pseudo_loss["total"] += total_loss
-            pseudo_loss["contrast"] += contrast_loss
-            pseudo_loss["sum"] += sum_loss
-            pseudo_loss["equal"] += equal_loss
+
 
             # pseudo_loss["hnorm"] += hnorm_loss
             # pseudo_loss["cnorm"] += cnorm_loss
