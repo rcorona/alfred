@@ -454,7 +454,8 @@ class Module(nn.Module):
 
         ### SETUP ###
         args = args or self.args
-        self.writer = SummaryWriter('runs_2/cpv_babyai_nov_12_traj_generalize_one')
+        # self.writer = SummaryWriter('runs_2/cpv_babyai_nov_12_traj_generalize_one')
+        self.writer = SummaryWriter(args.writer)
         fsave = os.path.join(args.dout, 'best.pth')
         psave = os.path.join(args.dout, 'pseudo_best.pth')
 
@@ -588,7 +589,8 @@ class Module(nn.Module):
             "cnorm": torch.tensor(0, dtype=torch.float),
             "tnorm": torch.tensor(0, dtype=torch.float),
             "cosine": torch.tensor(0, dtype=torch.float),
-            "generalizing": torch.tensor(0, dtype=torch.float)
+            "generalizing": torch.tensor(0, dtype=torch.float),
+            "imitation":torch.tensor(0, dtype=torch.float)
         }
 
         size = torch.tensor(0, dtype=torch.float)
