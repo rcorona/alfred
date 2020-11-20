@@ -62,6 +62,115 @@ class Module(Base):
         self.reset()
 
     @classmethod
+    def featurize(self, batch, load_mask=True, load_frames=True):
+        '''
+        tensorize and pad batch input
+        '''
+        device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
+        #device = torch.device('cpu')
+        feat = collections.defaultdict(list)
+
+        for ex in batch:
+            ###########
+            # auxillary
+            ###########
+
+            if not self.test_mode:
+                # subgoal completion supervision
+                if self.args.subgoal_aux_loss_wt > 0:
+                    feat['subgoals_completed'].append(np.array(ex['num']['low_to_high_idx']) / self.max_subgoals)
+
+                # progress monitor supervision
+                if self.args.pm_aux_loss_wt > 0:
+                    num_actions = len([a for sg in ex['num']['action_low'] for a in sg])
+                    subgoal_progress = [(i+1)/float(num_actions) for i in range(num_actions)]
+                    feat['subgoal_progress'].append(subgoal_progress)
+
+            #########
+            # inputs
+            #########
+
+            # serialize segments
+            self.serialize_lang_action(ex)
+
+            # goal and instr language
+            lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+
+            # zero inputs if specified
+            lang_goal = self.zero_input(lang_goal) if self.args.zero_goal else lang_goal
+            lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
+
+            # append goal + instr
+            lang_goal_instr = lang_goal + lang_instr
+            feat['lang_goal_instr'].append(lang_goal_instr)
+
+            # load Resnet features from disk
+            if load_frames and not self.test_mode:
+                root = self.get_task_root(ex)
+                #im = torch.load(os.path.join(root, self.feat_pt))
+                keep = [None] * len(ex['plan']['low_actions'])
+                for i, d in enumerate(ex['images']):
+                    # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+                    if keep[d['low_idx']] is None:
+                        keep[d['low_idx']] = torch.zeros((512,7,7), requires_grad=False) #im[i]
+                keep.append(keep[-1])  # stop frame
+                feat['frames'].append(torch.stack(keep, dim=0))
+
+
+            #########
+            # outputs
+            #########
+
+            if not self.test_mode:
+                # low-level action
+                feat['action_low'].append([a['action'] for a in ex['num']['action_low']])
+
+                # low-level action mask
+                if load_mask:
+                    feat['action_low_mask'].append([self.decompress_mask(a['mask']) for a in ex['num']['action_low'] if a['mask'] is not None])
+
+                # low-level valid interact
+                feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
+
+        # tensorization and padding
+        for k, v in feat.items():
+            if k in {'lang_goal_instr'}:
+                # language embedding and padding
+                seqs = [torch.tensor(vv, device=device) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
+                seq_lengths = np.array(list(map(len, v)))
+                embed_seq = self.emb_word(pad_seq)
+                packed_input = pack_padded_sequence(embed_seq, seq_lengths, batch_first=True, enforce_sorted=False)
+                feat[k] = packed_input
+            elif k in {'action_low_mask'}:
+                # mask padding
+                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
+                feat[k] = seqs
+            elif k in {'subgoal_progress', 'subgoals_completed'}:
+                # auxillary padding
+                seqs = [torch.tensor(vv, device=device, dtype=torch.float) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
+                feat[k] = pad_seq
+            else:
+                # default: tensorize and pad sequence
+                seqs = [torch.tensor(vv, device=device, dtype=torch.float if ('frames' in k) else torch.long) for vv in v]
+                pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
+                feat[k] = pad_seq
+
+        return feat
+
+
+    def serialize_lang_action(self, feat):
+        '''
+        append segmented instr language and low-level actions into single sequences
+        '''
+        is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
+        if not is_serialized:
+            feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
+            if not self.test_mode:
+                feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
+
+
     def decompress_mask(self, compressed_mask):
         '''
         decompress mask from json files
@@ -279,4 +388,11 @@ class Module(Base):
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
             m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
             m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
+        for task in data:
+            ex = self.load_task_json(task)
+            i = ex['task_id']
+            if i in preds:
+                label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
+                m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
+                m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}

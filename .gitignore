@@ -3,3 +3,16 @@
 *.txt
 media/*
 LICENSE
+data/
+*.yml
+*.pkl
+*.png
+*.jpg
+*.swp
+*__pycache__/
+runs/
+exp/
+exp_generalization/
+exp_movable/
+exp_pairs/
+exp_pick-2/

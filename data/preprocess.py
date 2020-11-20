@@ -43,6 +43,37 @@ class Dataset(object):
 
         for i in range(10):
             pass #random change. 
+        full_dict = {}
+        for k, d in splits.items():
+            for task in progressbar.progressbar(d):
+                json_path = os.path.join(self.args.data, k, task['task'], 'traj_data.json')
+
+                with open(json_path) as f:
+                    ex = json.load(f)
+
+                r_idx = task['repeat_idx'] # Index for the task in traj
+                traj = ex.copy()
+                if not task['task'] in full_dict.keys():
+                    full_dict[task['task']] = {
+                        'high_level': [],
+                        'low_level': []
+
+                    }
+                ann_high = revtok.tokenize(remove_spaces_and_lower(ex['turk_annotations']['anns'][r_idx]['task_desc'])) + ['<<goal>>']
+                ann_low = [revtok.tokenize(remove_spaces_and_lower(x)) for x in ex['turk_annotations']['anns'][r_idx]['high_descs']] + [['<<stop>>']]
+
+                full_dict[task['task']]['high_level'].append(self.numericalize(self.vocab['word'], ann_high, train=True))
+                full_dict[task['task']]['low_level'].append([self.numericalize(self.vocab['word'], x, train=True) for x in ann_low])
+
+
+        vocab_dout_path = os.path.join(self.args.dout, '%s.vocab' % self.args.pp_folder)
+        torch.save(self.vocab, vocab_dout_path)
+
+        complete = os.path.join(self.args.data, 'all_data.json')
+        with open(complete, 'w') as f:
+            json.dump(full_dict, f, sort_keys=True, indent=4)
+
+
 
         for k, d in splits.items():
             print('Preprocessing {}'.format(k))
@@ -61,12 +92,13 @@ class Dataset(object):
                 r_idx = task['repeat_idx'] # repeat_idx is the index of the annotation for each trajectory
                 traj = ex.copy()
 
+
                 # root & split
                 traj['root'] = os.path.join(self.args.data, task['task'])
                 traj['split'] = k
 
                 # numericalize language
-                self.process_language(ex, traj, r_idx)
+                self.process_language(ex, traj, complete, r_idx)
 
                 # numericalize actions for train/valid splits
                 if 'test' not in k: # expert actions are not available for the test set
@@ -91,7 +123,7 @@ class Dataset(object):
         torch.save(self.vocab, vocab_data_path)
 
 
-    def process_language(self, ex, traj, r_idx):
+    def process_language(self, ex, traj, complete, r_idx):
         # tokenize language
         traj['ann'] = {
             'goal': revtok.tokenize(remove_spaces_and_lower(ex['turk_annotations']['anns'][r_idx]['task_desc'])) + ['<<goal>>'],
@@ -103,7 +135,6 @@ class Dataset(object):
         traj['num'] = {}
         traj['num']['lang_goal'] = self.numericalize(self.vocab['word'], traj['ann']['goal'], train=True)
         traj['num']['lang_instr'] = [self.numericalize(self.vocab['word'], x, train=True) for x in traj['ann']['instr']]
-
 
     def process_actions(self, ex, traj):
         # deal with missing end high-level action
