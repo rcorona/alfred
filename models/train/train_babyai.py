@@ -31,7 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--workers', help='num workers', default=16, type=int)
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--writer', help='where to write tensorboard', default='cpv_babyai')
-    parser.add_argument('--resume', help='load a checkpoint')
+    parser.add_argument('--resume', help='load a checkpoint', action='store_true')
 
     # hyper parameters
     parser.add_argument('--batch', help='batch size', default=512, type=int)
@@ -110,6 +110,13 @@ if __name__ == '__main__':
 
     # load model
     model = M.Module(args, vocab)
+    
+    # Load checkpointed model. 
+    if args.resume:
+        model_path = os.path.join(args.dout, 'best.pth')
+        print('Loading checkpoint at: {}'.format(model_path))
+        model.load_state_dict(torch.load(model_path)['model'])
+    
     optimizer = None
 
     # to gpu

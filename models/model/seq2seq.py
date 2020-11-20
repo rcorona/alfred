@@ -11,7 +11,7 @@ import pickle
 import time
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from models.model.base import BaseModule, embed_packed_sequence
-from transformers import BertModel, BertTokenizer
+#from transformers import BertModel, BertTokenizer
 
 class AlfredDataset(Dataset): 
 

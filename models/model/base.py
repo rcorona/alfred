@@ -19,7 +19,7 @@ from torch.optim.optimizer import Optimizer
 from tqdm import trange
 from tensorboardX import SummaryWriter
 import pdb
-from pytorch_transformers import WarmupConstantSchedule
+#from pytorch_transformers import WarmupConstantSchedule
 
 from collections.abc import MutableMapping
 
