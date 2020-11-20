@@ -228,7 +228,10 @@ class Module(nn.Module):
         self.img_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
         self.obs_enc = nn.LSTM(args.demb, args.dhid, bidirectional=False, num_layers=2, batch_first=True)
 
-        self.im_linear_1 =  nn.Linear(args.dhid * 2, args.demb)
+        if self.args.baseline:
+            self.im_linear_1 =  nn.Linear(args.dhid * 3, args.demb)
+        else:
+            self.im_linear_1 =  nn.Linear(args.dhid * 2, args.demb)
         self.im_linear_2 =  nn.Linear(args.demb, self.num_actions)
 
         self.device = torch.device('cuda') if self.args.gpu else torch.device('cpu')
@@ -319,11 +322,19 @@ class Module(nn.Module):
 
         if self.args.imitation_loss:
             ## plan -> high - context
-            plan = high - context
             ## current -> Put context trajectory through a different lstm
             current, _, _ = self.observation_encoder(packed_context, B)
-            ## state -> concat plan and current
-            state = torch.cat([plan, current], dim=1)
+
+
+            if self.args.baseline:
+                state = torch.cat([high, context, current], dim=1)
+            else:
+                plan = high - context
+                ## state -> concat plan and current
+                state = torch.cat([plan, current], dim=1)
+
+
+
             ## put state through ff
             state = self.im_linear_1(state)
             state = F.relu(state)
