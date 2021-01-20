@@ -1,13 +1,19 @@
 #!/bin/bash
 
-dhid=$1
+seed=$1
+dhid=$2
+
+if [[ -z $seed ]]
+then
+  seed=123
+fi
 
 if [[ -z $dhid ]]
 then
   dhid=512
 fi
 
-name=monolithic_dhid:${dhid}
+name=monolithic_dhid:${dhid}:${seed}
 
 out_dir="exp/${name}"
 
@@ -26,4 +32,5 @@ python -u models/train/train_seq2seq.py \
   --dhid $dhid \
   --num_workers 8 \
   --print_git \
+  --seed $seed \
   | tee ${out_dir}/stdout.log
