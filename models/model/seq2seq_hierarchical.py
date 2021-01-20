@@ -68,6 +68,7 @@ class Module(Base):
 
         cloned_module_initialization = vars(args).get("cloned_module_initialization", False)
         init_model_path = vars(args).get("init_model_path", None)
+        modularize_actor_mask = vars(args).get('modularize_actor_mask', None)
 
         # Load pretrained parameters if desired. 
         if init_model_path: 
@@ -113,7 +114,8 @@ class Module(Base):
                            teacher_forcing=args.dec_teacher_forcing,
                            controller_type=self.controller_type,
                            cloned_module_initialization=cloned_module_initialization, # TODO(dfried): add controller type for ConvFrameMaskDecoderProgressMonitor
-                           init_model_path=init_model_path
+                           init_model_path=init_model_path,
+                           modularize_actor_mask=modularize_actor_mask
                            ) 
         # dropouts
         self.vis_dropout = nn.Dropout(args.vis_dropout)

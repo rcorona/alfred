@@ -66,6 +66,7 @@ def make_parser():
     parser.add_argument('--hierarchical_controller', choices=['attention', 'chunker'], default='attention')
     parser.add_argument('--cloned_module_initialization', help='initialize module parameters to the same values (but allow divergence in training)', action='store_true')
     parser.add_argument('--init_model_path', help='Path to monolithic model to initialize parameters with.', type=str, default=None)
+    parser.add_argument('--modularize_actor_mask', help='Give each submodule its own action and mask decoder.', action='store_true')
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')
@@ -84,6 +85,8 @@ def make_parser():
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
     parser.add_argument('--subgoal_pairs', help='Train on contiguous subgoal pairs.', action='store_true')
+    parser.add_argument('--subgoal_pairs_and_singles', help='Train on contiguous subgoal pairs and single subgoals.', action='store_true')
+    parser.add_argument('--subgoal_pairs_validate_full', help='but use full datasets for validation', action='store_true')
 
     parser.add_argument('--print_git', action='store_true')
     parser.add_argument('--no_make_debug', action='store_true', help="don't write the predictions to a json file")

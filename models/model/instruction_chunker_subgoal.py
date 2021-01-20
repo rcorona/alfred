@@ -67,8 +67,23 @@ class SubgoalChunker(BaseModule):
         parser.add_argument('--demb', help='language embedding size', default=100, type=int)
         parser.add_argument('--dhid', help='hidden layer size', default=128, type=int)
 
+        parser.add_argument('--instruction_chunker_memm', action='store_true', help='use a maximum entropy Markov model (rather than a CRF)')
+        parser.add_argument('--instruction_chunker_factored', action='store_true', help='predict tag types and whether to segment separately')
+
         # dropouts
         parser.add_argument('--lang_dropout', help='dropout rate for language instr', default=0., type=float)
+
+    def add_tag_params(self):
+        self.tag_init = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
+        self.tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
+
+    def add_pred_layer(self):
+        if self.args.instruction_chunker_factored:
+            self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.SUBMODULE_NAMES))
+            self.segment_pred_layer = nn.Linear(self.args.dhid*2, 1)
+            self.pad_pred_layer = nn.Linear(self.args.dhid*2, 1)
+        else:
+            self.chunk_pred_layer = nn.Linear(self.args.dhid*2, len(self.LABEL_VOCAB))
 
     def __init__(self, args, vocab):
         super().__init__(args)
@@ -84,10 +99,9 @@ class SubgoalChunker(BaseModule):
 
         self.bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
 
-        self.chunk_pred_layer = nn.Linear(args.dhid*2, len(self.LABEL_VOCAB))
+        self.add_pred_layer()
 
-        self.tag_init = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
-        self.tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
+        self.add_tag_params()
 
         # paths
         self.root_path = os.getcwd()
@@ -230,7 +244,13 @@ class SubgoalChunker(BaseModule):
             move_dict_to_cuda(feat)
 
         enc_lang = self.encode_lang(feat)
-        unaries = self.chunk_pred_layer(enc_lang)
+        if self.args.instruction_chunker_factored:
+            pad_scores = self.pad_pred_layer(enc_lang)
+            inside_module_scores = self.chunk_pred_layer(enc_lang)
+            begin_module_scores = self.segment_pred_layer(enc_lang) + inside_module_scores
+            unaries = torch.cat((pad_scores, begin_module_scores, inside_module_scores), dim=-1)
+        else:
+            unaries = self.chunk_pred_layer(enc_lang)
 
         edge_potentials = self.make_potentials(unaries, feat['lang_instr_len'])
         dist = LinearChainCRF(edge_potentials, lengths=feat['lang_instr_len'])
@@ -317,3 +337,93 @@ class SubgoalChunker(BaseModule):
             m['action_high_edit_distance'].append(compute_edit_distance(gold_labels, pred_labels))
 
         return {k: sum(v)/len(v) for k, v in m.items()}
+
+class SubgoalChunkerSelfTransitions(SubgoalChunker):
+    def add_tag_params(self):
+        self.tag_init = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
+        self.self_tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES),)), requires_grad=True)
+
+        self.i_b_tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
+        self.b_b_tag_transitions = nn.Parameter(torch.zeros((len(self.SUBMODULE_NAMES), len(self.SUBMODULE_NAMES))), requires_grad=True)
+
+    def make_potentials(self, tag_unaries, lengths):
+        # following https://github.com/harvardnlp/pytorch-struct/blob/b6816a4d436136c6711fe2617995b556d5d4d300/torch_struct/linearchain.py#L137
+        # tag_scores: batch x N x c
+        # lengths: batch
+        batch, N, C = tag_unaries.size()
+        assert C == len(self.LABEL_VOCAB)
+
+        # to, from
+        transition_mat = torch.full((C, C), BIG_NEG, device=tag_unaries.device)
+        # can transition from anything to PAD
+        transition_mat[self.PAD_ID,:] = 0
+
+        # can transition from B to I or I to I of the same subgoal
+        for ix, (b, i) in enumerate(zip(self.BEGIN_INDICES, self.INSIDE_INDICES)):
+            transition_mat[i, b] = self.self_tag_transitions[ix]
+            transition_mat[i, i] = self.self_tag_transitions[ix]
+
+        # scores from transitioning from B to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.BEGIN_INDICES)] = self.b_b_tag_transitions
+        # scores from transitioning from I to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.INSIDE_INDICES)] = self.i_b_tag_transitions
+
+        # batch x N x C(to) x C(from)
+        edge_potentials = torch.zeros((batch, N-1, C, C), device=tag_unaries.device)
+        for ix, t in enumerate(lengths):
+            # padding iff < the sequence length
+            edge_potentials[ix,:t-1,self.PAD_ID,:] = BIG_NEG
+            edge_potentials[ix,t-1:,:,:] = BIG_NEG
+            edge_potentials[ix,t-1:,self.PAD_ID,:] = 0
+
+        edge_potentials[:,0,:,self.BEGIN_INDICES] += self.tag_init.view(1,1,self.tag_init.size(-1))
+        edge_potentials[:,0,:,self.INSIDE_INDICES] = BIG_NEG
+        edge_potentials[:,:,:,:] += transition_mat.view(1,1,C,C)
+
+        edge_potentials[:,:,:,:] += tag_unaries.view(batch, N, C, 1)[:, 1:]
+        edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
+
+        return edge_potentials
+
+class SubgoalChunkerNoTransitions(SubgoalChunker):
+    def add_tag_params(self):
+        pass
+
+    def make_potentials(self, tag_unaries, lengths):
+        # following https://github.com/harvardnlp/pytorch-struct/blob/b6816a4d436136c6711fe2617995b556d5d4d300/torch_struct/linearchain.py#L137
+        # tag_scores: batch x N x c
+        # lengths: batch
+        batch, N, C = tag_unaries.size()
+        assert C == len(self.LABEL_VOCAB)
+
+        # to, from
+        transition_mat = torch.full((C, C), BIG_NEG, device=tag_unaries.device)
+        # can transition from anything to PAD
+        transition_mat[self.PAD_ID,:] = 0
+
+        # can transition from B to I or I to I of the same subgoal
+        for ix, (b, i) in enumerate(zip(self.BEGIN_INDICES, self.INSIDE_INDICES)):
+            transition_mat[i, b] = 0
+            transition_mat[i, i] = 0
+
+        # scores from transitioning from B to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.BEGIN_INDICES)] = 0
+        # scores from transitioning from I to B of each subgoal type
+        transition_mat[np.ix_(self.BEGIN_INDICES,self.INSIDE_INDICES)] = 0
+
+        # batch x N x C(to) x C(from)
+        edge_potentials = torch.zeros((batch, N-1, C, C), device=tag_unaries.device)
+        for ix, t in enumerate(lengths):
+            # padding iff < the sequence length
+            edge_potentials[ix,:t-1,self.PAD_ID,:] = BIG_NEG
+            edge_potentials[ix,t-1:,:,:] = BIG_NEG
+            edge_potentials[ix,t-1:,self.PAD_ID,:] = 0
+
+        # edge_potentials[:,0,:,self.BEGIN_INDICES] += self.tag_init.view(1,1,self.tag_init.size(-1))
+        edge_potentials[:,0,:,self.INSIDE_INDICES] = BIG_NEG
+        edge_potentials[:,:,:,:] += transition_mat.view(1,1,C,C)
+
+        edge_potentials[:,:,:,:] += tag_unaries.view(batch, N, C, 1)[:, 1:]
+        edge_potentials[:,0,:,:] += tag_unaries.view(batch, N, 1, C)[:, 0]
+
+        return edge_potentials

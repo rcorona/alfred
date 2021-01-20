@@ -9,10 +9,8 @@ model_dir=$1
 
 subgoals=$2
 
-date=`date -Iminutes`
-
-for split in valid_seen valid_unseen
-#for split in valid_seen
+#for split in valid_seen valid_unseen
+for split in valid_seen
 #for split in valid_unseen valid_seen
 do
   python -u models/eval/eval_seq2seq.py \
@@ -20,11 +18,12 @@ do
     --eval_split $split \
     --data data/json_feat_2.1.0 \
     --model models.model.seq2seq_hierarchical \
+    --splits data/splits/object_receptacle_partitioned.json \
     --gpu \
     --num_threads 3 \
     --subgoals $subgoals \
     --eval_type subgoals \
     --oracle \
     --print_git \
-    | tee ${model_dir}/eval_oracle_subgoals_${subgoals}_${split}_${date}.out
+    | tee ${model_dir}/eval_oracle_subgoals_${subgoals}_${split}_generalization.out
 done
