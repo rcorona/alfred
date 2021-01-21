@@ -7,6 +7,8 @@ source activate alfred
 
 model_dir=$1
 
+date=`date -Iminutes`
+
 for split in valid_seen valid_unseen
 do
   python -u models/eval/eval_seq2seq.py \
@@ -17,5 +19,5 @@ do
     --model models.model.seq2seq_im_mask \
     --gpu \
     --num_threads 3 \
-    | tee ${model_dir}/eval_${split}_movable.out
+    | tee ${model_dir}/eval_${split}_movable_${date}.out
 done
