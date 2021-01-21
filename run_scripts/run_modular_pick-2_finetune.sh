@@ -16,7 +16,7 @@ then
   dhid=512
 fi
 
-name=modular_finetune_dhid:${dhid}
+name=modular_finetune_dhid:${dhid}:${seed}
 
 if [[ -z $hstate_dropout ]]
 then
