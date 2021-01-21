@@ -1,9 +1,15 @@
 #!/bin/bash
 
 pretrain_path=$1
-dhid=$2
-hstate_dropout=$3
-actor_dropout=$4
+seed=$2
+dhid=$3
+hstate_dropout=$4
+actor_dropout=$5
+
+if [[ -z $seed ]]
+then 
+  seed=123
+fi
 
 if [[ -z $dhid ]]
 then
@@ -48,4 +54,5 @@ python -u models/train/train_seq2seq.py \
   --hierarchical_controller chunker \
   --cloned_module_initialization \
   --init_model_path $pretrain_path \
+  --seed $seed \
   | tee ${out_dir}/stdout.log
