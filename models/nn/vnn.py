@@ -295,6 +295,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
             self.h_tm1_fc = nn.ModuleList([clone_module(self.h_tm1_fc) for i in range(n_modules)])
 
             # Freeze GotoLocation module. 
+            """
             for p in self.cell[0].parameters(): 
                 p.requires_grad = False
 
@@ -303,6 +304,7 @@ class ConvFrameMaskDecoderModular(nn.Module):
 
             for p in self.h_tm1_fc[0].parameters(): 
                 p.requires_grad = False
+            """
 
             if modularize_actor_mask: 
                 self.actor = nn.ModuleList([clone_module(self.actor) for i in range(n_modules)])
