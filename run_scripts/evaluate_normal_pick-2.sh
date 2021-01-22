@@ -7,6 +7,7 @@ source activate alfred
 
 model_dir=$1
 
+date=`date -Iminutes`
 for split in valid_seen valid_unseen
 do
   python -u models/eval/eval_seq2seq.py \
@@ -18,5 +19,5 @@ do
     --gpu \
     --num_threads 3 \
     --print_git \
-    | tee ${model_dir}/eval_${split}_pick-2.out
+    | tee ${model_dir}/eval_${split}_pick-2_${date}.out
 done

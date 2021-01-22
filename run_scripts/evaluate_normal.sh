@@ -18,5 +18,6 @@ do
     --model models.model.seq2seq_im_mask \
     --gpu \
     --num_threads 3 \
+    --print_git \
     | tee ${model_dir}/eval_${split}_${date}.out
 done
