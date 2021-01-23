@@ -14,6 +14,8 @@ then
   exit 1;
 fi
 
+date=`date -Iminutes`
+
 for split in valid_seen valid_unseen
 do
   python -u models/eval/eval_seq2seq.py \
@@ -26,5 +28,5 @@ do
     --hierarchical_controller chunker \
     --hierarchical_controller_chunker_model_path ${chunker_model_dir}/best_seen.pth \
     --print_git \
-    | tee ${model_dir}/eval_${split}.out
+    | tee ${model_dir}/eval_${split}_${date}.out
 done
