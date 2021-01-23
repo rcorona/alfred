@@ -9,11 +9,7 @@ model_dir=$1
 
 chunker_model_dir=$2
 
-if [[ -z $chunker_model_dir ]]
-then
-  echo "pass a chunker model"
-  exit 1;
-fi
+subgoals=all
 
 date=`date -Iminutes`
 
@@ -29,8 +25,9 @@ do
     --model models.model.seq2seq_hierarchical \
     --gpu \
     --num_threads 3 \
-    --hierarchical_controller chunker \
+    --subgoals $subgoals \
+    --eval_type subgoals \
     --hierarchical_controller_chunker_model_path ${chunker_model_dir}/best_seen.pth \
     --print_git \
-    | tee ${model_dir}/eval_${split}_movable_${date}.out
+    | tee ${model_dir}/eval_chunker_subgoals_${subgoals}_${split}_movable_${date}.out
 done
