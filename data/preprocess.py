@@ -25,6 +25,8 @@ class Dataset(object):
         else:
             self.vocab = vocab
 
+        self.actions = {}
+
         self.word_seg = self.vocab['word'].word2index('<<seg>>', train=False)
 
 

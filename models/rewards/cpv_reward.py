@@ -37,7 +37,7 @@ class CPV(nn.Module):
 
         self.to(self.device)
 
-        self.load_state_dict(primed_model['model'], strict=False)
+        # self.load_state_dict(primed_model['model'], strict=False)
 
 
     def language_encoder(self, batch, batch_size, h_0=None, c_0=None):
@@ -131,9 +131,9 @@ class CPV(nn.Module):
         ### COMB ###
         reward = torch.dot(high/high.norm(), trajectory/high.norm()) - torch.dot(high/high.norm(), context/high.norm())
 
-        done = torch.dot(high/high.norm(), context/high.norm())
+        done = torch.dot(high, context)
 
-        return reward, done, high.norm()
+        return reward, done, context.norm()
 
     def remove_spaces(self, s):
         cs = ' '.join(s.split())
@@ -146,39 +146,41 @@ class CPV(nn.Module):
 
     def calculate_reward(self, high, contexts, target):
 
-        high = revtok.tokenize(self.remove_spaces_and_lower(high)) # -> M
-        high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict() else '<<goal>>' for w in high]) # -> M
-        high = torch.tensor(high, dtype=torch.long) # -> M
-        high = high.reshape(1, -1).to(self.device) # -> 1 x M
+        # high = torch.tensor(high).unsqueeze(0).to(self.device)
+        #
+        # final_shape = 7 * 7 * (11 + 6 + 3)
+        # object_default = np.array([np.eye(11) for _ in range(49)])
+        # color_default = np.array([np.eye(6) for _ in range(49)])
+        # state_default = np.array([np.eye(3) for _ in range(49)])
+        #
+        # contexts = [np.reshape(img, (49, -1)) for img in contexts]
+        # contexts_object = [torch.tensor(object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in contexts]
+        # contexts_color = [torch.tensor(color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in contexts]
+        # contexts_state = [torch.tensor(state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in contexts]
+        # contexts = [torch.cat([contexts_object[i], contexts_color[i], contexts_state[i]], dim=1).reshape(final_shape) for i in range(len(contexts))]
+        #
+        # if len(contexts) == 0:
+        #     contexts = torch.tensor([[self.pad for x in range(final_shape)]], dtype=torch.float).to(self.device)
+        # else:
+        #     contexts = torch.stack(contexts, dim=0).to(self.device)
+        #
+        # target = np.reshape(target, (49, -1))
+        # target_object = torch.tensor(object_default[list(range(49)), target[:, 0], :], dtype=torch.float)
+        # target_color = torch.tensor(color_default[list(range(49)), target[:, 1], :], dtype=torch.float)
+        # target_state = torch.tensor(state_default[list(range(49)), target[:, 2], :], dtype=torch.float)
+        # target = torch.cat([target_object, target_color, target_state], dim=1).reshape(final_shape).to(self.device)
+        #
+        # self.eval()
+        # reward, done, cnorm = self.forward(high, contexts, target)
+        # reward = reward.to(torch.device('cpu')).detach().item()
+        # done = done.to(torch.device('cpu')).detach().item()
+        # cnorm = cnorm.to(torch.device('cpu')).detach().item()
+        # return reward, done, cnorm
 
-        final_shape = 7 * 7 * (11 + 6 + 3)
-        object_default = np.array([np.eye(11) for _ in range(49)])
-        color_default = np.array([np.eye(6) for _ in range(49)])
-        state_default = np.array([np.eye(3) for _ in range(49)])
+        high = revtok.tokenize(self.remove_spaces_and_lower(high))
+        high = self.vocab.word2index([w.strip().lower() for w in high])
 
-        contexts = [np.reshape(img, (49, -1)) for img in contexts]
-        contexts_object = [torch.tensor(object_default[list(range(49)), img[:, 0], :], dtype=torch.float) for img in contexts]
-        contexts_color = [torch.tensor(color_default[list(range(49)), img[:, 1], :], dtype=torch.float) for img in contexts]
-        contexts_state = [torch.tensor(state_default[list(range(49)), img[:, 2], :], dtype=torch.float) for img in contexts]
-        contexts = [torch.cat([contexts_object[i], contexts_color[i], contexts_state[i]], dim=1).reshape(final_shape) for i in range(len(contexts))]
-
-        if len(contexts) == 0:
-            contexts = torch.tensor([[self.pad for x in range(final_shape)]], dtype=torch.float).to(self.device)
-        else:
-            contexts = torch.stack(contexts, dim=0).to(self.device)
-
-        target = np.reshape(target, (49, -1))
-        target_object = torch.tensor(object_default[list(range(49)), target[:, 0], :], dtype=torch.float)
-        target_color = torch.tensor(color_default[list(range(49)), target[:, 1], :], dtype=torch.float)
-        target_state = torch.tensor(state_default[list(range(49)), target[:, 2], :], dtype=torch.float)
-        target = torch.cat([target_object, target_color, target_state], dim=1).reshape(final_shape).to(self.device)
-
-        self.eval()
-        reward, done, cnorm = self.forward(high, contexts, target)
-        reward = reward.to(torch.device('cpu')).detach().item()
-        done = done.to(torch.device('cpu')).detach().item()
-        cnorm = cnorm.to(torch.device('cpu')).detach().item()
-        return reward, done, cnorm
+        return high
 
     def works(self, high):
         high = revtok.tokenize(self.remove_spaces_and_lower(high)) # -> M

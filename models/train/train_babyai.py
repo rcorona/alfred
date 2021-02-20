@@ -30,6 +30,7 @@ if __name__ == '__main__':
     parser.add_argument('--pseudo', help='track more finely', action='store_true')
     parser.add_argument('--workers', help='num workers', default=16, type=int)
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
+    parser.add_argument('--writer', help='where to write tensorboard', default='cpv_babyai')
     parser.add_argument('--resume', help='load a checkpoint')
 
     # hyper parameters
@@ -52,6 +53,7 @@ if __name__ == '__main__':
     parser.add_argument('--generalizing_loss', help='generalization loss', action='store_true')
     parser.add_argument('--imitation_loss', help='imitation loss', action='store_true')
     parser.add_argument('--cpv_loss', help='all cpv loss', action='store_true')
+    parser.add_argument('--baseline', help='baseline', action='store_true')
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')

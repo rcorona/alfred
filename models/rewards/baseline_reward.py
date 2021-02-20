@@ -64,22 +64,21 @@ class Baseline(nn.Module):
         enc(high) - enc(context) with each enc(target)
         '''
         ### High ###
-        high = self.embed(high) # -> B x M x D
+        high = self.embed(high) # -> 1 x M x D
         high, _, _ = self.language_encoder(high, 1) # -> 1 x H
-        high = high.squeeze()
+        high = high
 
         ### Context ###
-        context = self.linear(context)
+        context = self.linear(context) # -> 1 x N x S
         context, _, _ = self.image_encoder(context.reshape(1, -1, self.args.demb), 1) # -> 1 x H
-        context = context.squeeze()
+        context = context
 
         ### Combination ###
-        combination = torch.cat((high, context), dim=0)# -> 2H
+        combination = torch.cat((high, context), dim=1)# -> 1 x 2H
         combination = self.lin_1(combination) # -> 10H
         combination = F.relu(combination) # -> 10H
         combination = self.lin_2(combination).squeeze() # -> 1
         combination = F.tanh(combination) # -> 1
-
 
         return combination
 
@@ -94,10 +93,7 @@ class Baseline(nn.Module):
 
     def calculate_reward(self, high, contexts, target):
 
-        high = revtok.tokenize(self.remove_spaces_and_lower(high)) # -> M
-        high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict() else '<<goal>>' for w in high]) # -> M
-        high = torch.tensor(high, dtype=torch.long) # -> M
-        high = high.reshape(1, -1).to(self.device) # -> 1 x M
+        high = torch.tensor(high).unsqueeze(0).to(self.device) # -> 1 x M
 
         final_shape = 7 * 7 * (11 + 6 + 3)
         object_default = np.array([np.eye(11) for _ in range(49)])
