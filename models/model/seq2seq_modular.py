@@ -7,39 +7,39 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from model.seq2seq import Module as Base
+from model.seq2seq_im_mask import Module as Seq2SeqIM
+
+from models.model.base import move_dict_to_cuda
 from models.utils.metric import compute_f1, compute_exact
 from gen.utils.image_util import decompress_mask
-
+import pdb
 
 class Module(Base):
 
     def __init__(self, args, vocab):
         '''
-        Seq2Seq agent
+        Modular Seq2Seq agent
         '''
         super().__init__(args, vocab)
-
-        # encoder and self-attention
-        self.enc = nn.LSTM(args.demb, args.dhid, bidirectional=True, batch_first=True)
-        self.enc_att = vnn.SelfAttn(args.dhid*2)
 
         # subgoal monitoring
         self.subgoal_monitoring = (self.args.pm_aux_loss_wt > 0 or self.args.subgoal_aux_loss_wt > 0)
 
-        # frame mask decoder
-        decoder = vnn.ConvFrameMaskDecoderProgressMonitor if self.subgoal_monitoring else vnn.ConvFrameMaskDecoder
-        self.dec = decoder(self.emb_action_low, args.dframe, 2*args.dhid,
-                           pframe=args.pframe,
-                           attn_dropout=args.attn_dropout,
-                           hstate_dropout=args.hstate_dropout,
-                           actor_dropout=args.actor_dropout,
-                           input_dropout=args.input_dropout,
-                           teacher_forcing=args.dec_teacher_forcing)
+        # Individual network for each of the 8 submodules. 
+        self.submodules = nn.ModuleList([Seq2SeqIM(args, vocab) for i in range(8)])
 
-        # dropouts
-        self.vis_dropout = nn.Dropout(args.vis_dropout)
-        self.lang_dropout = nn.Dropout(args.lang_dropout, inplace=True)
-        self.input_dropout = nn.Dropout(args.input_dropout)
+        # Dictionary from submodule names to idx. 
+        self.submodule_names = [
+            'GotoLocation', 
+            'PickupObject', 
+            'PutObject', 
+            'CoolObject', 
+            'HeatObject', 
+            'CleanObject', 
+            'SliceObject', 
+            'ToggleObject',
+            'NoOp'
+        ]
 
         # internal states
         self.state_t = None
@@ -60,35 +60,7 @@ class Module(Base):
         # reset model
         self.reset()
 
-
-    # @classmethod
-    def shuffle_feats(self, feat):
-
-        N = len(feat['lang_goal_instr'])
-        new_feat = {}
-        new_feat['lang_goal_instr'] = [None for i in range(N)] ## NxMxH List of language instrs
-        new_feat['frames'] = [None for i in range(N)] ## NxM image tensors
-        new_feat['action_low'] = [None for i in range(N)] ## NxM List of actual low level actions
-        new_feat['action_low_mask'] = [None for i in range(N)] ## NxM
-        new_feat['action_low_valid_interact'] = [None for i in range(N)] ## NxM
-
-        for i in range(N):
-            j = np.random.randint(0, high=N)
-            split_i = np.random.randint(0, high=len(feat['lang_goal_instr'][i]))
-            split_j = np.random.randint(0, high=len(feat['lang_goal_instr'][j]))
-
-
-            split_i_low = np.where(np.array(feat['low_to_high_idx'][i]) == split_i)[0][-1]
-            split_j_low = np.where(np.array(feat['low_to_high_idx'][j]) == split_j)[0][0]
-            new_feat['lang_goal_instr'][i] = feat['lang_goal_instr'][i][:split_i] + feat['lang_goal_instr'][j][split_j:]
-            new_feat['frames'][i] = torch.cat([feat['frames'][i][:split_i_low], feat['frames'][j][split_j_low:]], dim=0)
-            new_feat['action_low'][i] = feat['action_low'][i][:split_i_low] + feat['action_low'][j][split_j_low:]
-            new_feat['action_low_mask'][i] = feat['action_low_mask'][i][:split_i_low] + feat['action_low_mask'][j][split_j_low:]
-            new_feat['action_low_valid_interact'][i] = feat['action_low_valid_interact'][i][:split_i_low] + feat['action_low_valid_interact'][j][split_j_low:]
-        return new_feat
-
-
-    def featurize(self, batch, load_mask=True, load_frames=True, shuffle=0):
+    def featurize(self, batch, load_mask=True, load_frames=True):
         '''
         tensorize and pad batch input
         '''
@@ -115,40 +87,35 @@ class Module(Base):
             # inputs
             #########
 
-            # serialize segments
-
-            self.serialize_action(ex)
-
             # goal and instr language
             lang_goal, lang_instr = ex['num']['lang_goal'], ex['num']['lang_instr']
+
             # zero inputs if specified
             lang_goal = self.zero_input(lang_goal) if self.args.zero_goal else lang_goal
-            lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
+            #lang_instr = self.zero_input(lang_instr) if self.args.zero_instr else lang_instr
+
             # append goal + instr
-            lang_goal_instr = lang_instr
-            feat['lang_goal_instr'].append(lang_goal_instr)
-            feat['low_to_high_idx'].append(ex['num']['low_to_high_idx'])
+            feat['lang_goal_instr'].append([lang_goal + instr for instr in lang_instr])
+
             # load Resnet features from disk
             if load_frames and not self.test_mode:
                 root = self.get_task_root(ex)
                 im = torch.load(os.path.join(root, self.feat_pt))
+                keep = [None] * len(ex['plan']['low_actions'])
+                for i, d in enumerate(ex['images']):
+                    # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
+                    if keep[d['low_idx']] is None:
+                        keep[d['low_idx']] = im[i]
+                if not self.args.subgoal: keep.append(keep[-1])  # stop frame
+                feat['frames'].append(torch.stack(keep, dim=0))
 
-                num_low_actions = len(ex['plan']['low_actions']) + 1  # +1 for additional stop action
-                num_feat_frames = im.shape[0]
-
-                # Modeling Quickstart (without filler frames)
-                if num_low_actions == num_feat_frames:
-                    feat['frames'].append(im)
-
-                # Full Dataset (contains filler frames)
-                else:
-                    keep = [None] * num_low_actions
-                    for i, d in enumerate(ex['images']):
-                        # only add frames linked with low-level actions (i.e. skip filler frames like smooth rotations and dish washing)
-                        if keep[d['low_idx']] is None:
-                            keep[d['low_idx']] = im[i]
-                    keep[-1] = im[-1]  # stop frame
-                    feat['frames'].append(torch.stack(keep, dim=0))
+            # Ground trutch high-idx for modular model. 
+            feat['module_idx'] = [self.submodule_names.index(a['discrete_action']['action']) for a in ex['plan']['high_pddl']]
+            
+            feat['a_module_idx'] = []
+            for seq in ex['num']['action_low']: 
+                for a in seq: 
+                    feat['a_module_idx'].append(feat['module_idx'][a['high_idx']])
 
             #########
             # outputs
@@ -156,34 +123,33 @@ class Module(Base):
 
             if not self.test_mode:
                 # low-level action
-                feat['action_low'].append([a['action'] for a in ex['num']['action_low']])
+                action_low = []
+                for seq in ex['num']['action_low']: 
+                    action_low.append([a['action'] for a in seq])
+
+                feat['action_low'].append(action_low)
 
                 # low-level action mask
                 if load_mask:
-                    # feat['action_low_mask'].append([self.decompress_mask(a['mask']) for a in ex['num']['action_low']])
-                    feat['action_low_mask'].append([a['mask'] for a in ex['num']['action_low']])
+                    masks = []
+                    for seq in ex['num']['action_low']: 
+                        masks.append([self.decompress_mask(a['mask']) for a in seq if a['mask'] is not None])
+
+                    feat['action_low_mask'].append(masks)
 
                 # low-level valid interact
-                feat['action_low_valid_interact'].append([a['valid_interact'] for a in ex['num']['action_low']])
+                valid_interact = []
+                for seq in ex['num']['action_low']: 
+                    valid_interact.append([a['valid_interact'] for a in seq])
 
-        # print("lang", len(feat['lang_goal_instr'][0]))
-        # print("low to high", len(feat['low_to_high_idx'][0]))
-        # print("frame", feat['frames'][0].shape)
-        # print("alow", len(feat['action_low'][0]))
-        # print("mask", len(feat['action_low_mask'][0]))
-        # print("interact", len(feat['action_low_valid_interact'][0]))
-
-        for _ in range(shuffle):
-            feat = self.shuffle_feats(feat)
-        for f in range(len(feat['action_low_mask'])):
-            feat['action_low_mask'][f] = [self.decompress_mask(a) for a in feat['action_low_mask'][f] if a is not None]
-        self.serialize_lang(feat)
-
+                feat['action_low_valid_interact'].append(valid_interact)
+               
         # tensorization and padding
         for k, v in feat.items():
             if k in {'lang_goal_instr'}:
                 # language embedding and padding
                 seqs = [torch.tensor(vv, device=device) for vv in v]
+                pdb.set_trace()
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
                 seq_lengths = np.array(list(map(len, v)))
                 embed_seq = self.emb_word(pad_seq)
@@ -204,27 +170,23 @@ class Module(Base):
                 pad_seq = pad_sequence(seqs, batch_first=True, padding_value=self.pad)
                 feat[k] = pad_seq
 
+                if k == 'action_low':
+                    pdb.set_trace()
 
         return feat
-
-
-
-    def serialize_lang(self, feat):
+    
+    def serialize_lang_action(self, feat):
         '''
         append segmented instr language and low-level actions into single sequences
         '''
-        # is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
-        # if not is_serialized:
-        #     feat['num']['lang_instr'] = [word for desc in feat['num']['lang_instr'] for word in desc]
-        #     if not self.test_mode:
-        #         feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-        for f in range(len(feat['lang_goal_instr'])):
-            feat['lang_goal_instr'][f] = [word for desc in feat['lang_goal_instr'][f] for word in desc]
-
-    def serialize_action(self, feat):
-        if not self.test_mode:
-            feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
-
+        
+        try: 
+            is_serialized = not isinstance(feat['num']['lang_instr'][0], list)
+            if not is_serialized:
+                if not self.test_mode:
+                    feat['num']['action_low'] = [a for a_group in feat['num']['action_low'] for a in a_group]
+        except: 
+            pass#pdb.set_trace()
 
     def decompress_mask(self, compressed_mask):
         '''
@@ -236,10 +198,13 @@ class Module(Base):
 
 
     def forward(self, feat, max_decode=300):
+        #pdb.set_trace()
+        if self.args.gpu:
+            move_dict_to_cuda(feat)
         cont_lang, enc_lang = self.encode_lang(feat)
-        state_0 = cont_lang, torch.zeros_like(cont_lang)
+        state_0 = cont_lang[0], torch.zeros_like(cont_lang)
         frames = self.vis_dropout(feat['frames'])
-        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0)
+        res = self.dec(enc_lang, frames, max_decode=max_decode, gold=feat['action_low'], state_0=state_0, module_idx=feat['module_idx'])
         feat.update(res)
         return feat
 
@@ -249,14 +214,25 @@ class Module(Base):
         encode goal+instr language
         '''
         emb_lang_goal_instr = feat['lang_goal_instr']
-        self.lang_dropout(emb_lang_goal_instr.data)
-        enc_lang_goal_instr, _ = self.enc(emb_lang_goal_instr)
-        enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
-        self.lang_dropout(enc_lang_goal_instr)
-        cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+        
+        # Dynamically use modules. 
+        cont_lang_goal_instrs = []
+        enc_lang_goal_instrs = []
 
-        return cont_lang_goal_instr, enc_lang_goal_instr
+        for i in range(len(emb_lang_goal_instr)):
+    
+            module = self.submodules[feat['module_idx'][i]]
 
+            module.lang_dropout(emb_lang_goal_instr[i].data)
+            enc_lang_goal_instr, _ = module.enc(emb_lang_goal_instr[i])
+            enc_lang_goal_instr, _ = pad_packed_sequence(enc_lang_goal_instr, batch_first=True)
+            module.lang_dropout(enc_lang_goal_instr)
+            cont_lang_goal_instr = self.enc_att(enc_lang_goal_instr)
+
+            cont_lang_goal_instrs.append(cont_lang_goal_instr)
+            enc_lang_goal_instrs.append(enc_lang_goal_instr)
+
+        return cont_lang_goal_instrs, enc_lang_goal_instrs
 
     def reset(self):
         '''
@@ -285,6 +261,7 @@ class Module(Base):
 
         # previous action embedding
         e_t = self.embed_action(prev_action) if prev_action is not None else self.r_state['e_t']
+
         # decode and save embedding and hidden states
         out_action_low, out_action_low_mask, state_t, *_ = self.dec.step(self.r_state['enc_lang'], feat['frames'][:, 0], e_t=e_t, state_tm1=self.r_state['state_t'])
 
@@ -324,8 +301,8 @@ class Module(Base):
             alow_mask = F.sigmoid(alow_mask)
             p_mask = [(alow_mask[t] > 0.5).cpu().numpy() for t in range(alow_mask.shape[0])]
 
-            task_id_ann = self.get_task_and_ann_id(ex)
-            pred[task_id_ann] = {
+            key = (ex['task_id'], ex['repeat_idx'])
+            pred[key] = {
                 'action_low': ' '.join(words),
                 'action_low_mask': p_mask,
             }
@@ -349,7 +326,6 @@ class Module(Base):
         '''
         losses = dict()
 
-
         # GT and predictions
         p_alow = out['out_action_low'].view(-1, len(self.vocab['action_low']))
         l_alow = feat['action_low'].view(-1)
@@ -358,7 +334,12 @@ class Module(Base):
 
         # action loss
         pad_valid = (l_alow != self.pad)
-        alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        
+        try: 
+            alow_loss = F.cross_entropy(p_alow, l_alow, reduction='none')
+        except: 
+            pdb.set_trace()
+
         alow_loss *= pad_valid.float()
         alow_loss = alow_loss.mean()
         losses['action_low'] = alow_loss * self.args.action_loss_wt
@@ -367,8 +348,10 @@ class Module(Base):
         valid_idxs = valid.view(-1).nonzero().view(-1)
         flat_p_alow_mask = p_alow_mask.view(p_alow_mask.shape[0]*p_alow_mask.shape[1], *p_alow_mask.shape[2:])[valid_idxs]
         flat_alow_mask = torch.cat(feat['action_low_mask'], dim=0)
-        alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
-        losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
+            
+        if len(flat_alow_mask) > 0: 
+            alow_mask_loss = self.weighted_mask_loss(flat_p_alow_mask, flat_alow_mask)
+            losses['action_low_mask'] = alow_mask_loss * self.args.mask_loss_wt
 
         # subgoal completion loss
         if self.args.subgoal_aux_loss_wt > 0:
@@ -395,13 +378,15 @@ class Module(Base):
         '''
         mask loss that accounts for weight-imbalance between 0 and 1 pixels
         '''
-        # print(pred_masks.shape)
-        # print(gt_masks.shape)
-        pred_masks = pred_masks.reshape(*gt_masks.shape)
-        bce = self.bce_with_logits(pred_masks, gt_masks)
+        try:
+            bce = self.bce_with_logits(pred_masks, gt_masks)
+        except: 
+            pdb.set_trace()
+        
         flipped_mask = self.flip_tensor(gt_masks)
         inside = (bce * gt_masks).sum() / (gt_masks).sum()
         outside = (bce * flipped_mask).sum() / (flipped_mask).sum()
+        
         return inside + outside
 
 
@@ -420,10 +405,10 @@ class Module(Base):
         compute f1 and extract match scores for output
         '''
         m = collections.defaultdict(list)
-        for task in data:
-            ex = self.load_task_json(task)
-            i = self.get_task_and_ann_id(ex)
+        for ex in data:
+            # if 'repeat_idx'in ex: ex = self.load_task_json(ex, None)[0]
+            key = (ex['task_id'], ex['repeat_idx'])
             label = ' '.join([a['discrete_action']['action'] for a in ex['plan']['low_actions']])
-            m['action_low_f1'].append(compute_f1(label.lower(), preds[i]['action_low'].lower()))
-            m['action_low_em'].append(compute_exact(label.lower(), preds[i]['action_low'].lower()))
+            m['action_low_f1'].append(compute_f1(label.lower(), preds[key]['action_low'].lower()))
+            m['action_low_em'].append(compute_exact(label.lower(), preds[key]['action_low'].lower()))
         return {k: sum(v)/len(v) for k, v in m.items()}

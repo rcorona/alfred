@@ -41,6 +41,8 @@ class Module(nn.Module):
         # summary self.writer
         self.summary_writer = None
 
+        self.shuffle = self.args.complex_batching_shuffle
+
     def run_train(self, splits, args=None, optimizer=None):
         '''
         training loop
@@ -110,10 +112,8 @@ class Module(nn.Module):
                 sum_loss = sum_loss.detach().cpu()
                 total_train_loss.append(float(sum_loss))
                 train_iter += self.args.batch
-                if train_iter > 2000:
-                    break
 
-            
+
             print('\ntrain metrics\n')
             # compute metrics for train
             m_train = {k: sum(v) / len(v) for k, v in m_train.items()}
@@ -214,7 +214,7 @@ class Module(nn.Module):
         self.eval()
         total_loss = list()
         dev_iter = iter
-        for batch, feat in self.iterate(dev, args.batch, args.subgoal):
+        for batch, feat in self.iterate(dev, args.batch, args.subgoal, train=False):
             out = self.forward(feat)
             preds = self.extract_preds(out, batch, feat)
             p_dev.update(preds)
@@ -233,7 +233,7 @@ class Module(nn.Module):
         total_loss = sum(total_loss) / len(total_loss)
         return p_dev, dev_iter, total_loss, m_dev
 
-    def featurize(self, batch):
+    def featurize(self, batch, shuffle=0):
         raise NotImplementedError()
 
     def forward(self, feat, max_decode=100):
@@ -248,6 +248,12 @@ class Module(nn.Module):
     def compute_metric(self, preds, data):
         raise NotImplementedError()
 
+    def get_task_and_ann_id(self, ex):
+        '''
+        single string for task_id and annotation repeat idx
+        '''
+        return "%s_%s" % (ex['task_id'], str(ex['ann']['repeat_idx']))
+
     def make_debug(self, preds, data):
         '''
         readable output generator for debugging
@@ -255,7 +261,7 @@ class Module(nn.Module):
         debug = {}
         for task in data:
             ex = self.load_task_json(task)
-            i = ex['task_id']
+            i = self.get_task_and_ann_id(ex)
             debug[i] = {
                 'lang_goal': ex['turk_annotations']['anns'][ex['ann']['repeat_idx']]['task_desc'],
                 'action_low': [a['discrete_action']['action'] for a in ex['plan']['low_actions']],
@@ -271,49 +277,49 @@ class Module(nn.Module):
         with open(json_path) as f:
             data = json.load(f)
 
-        if subgoal is not None: 
+        if subgoal is not None:
             data = self.filter_subgoal(data, subgoal)
 
         return data
 
-    def filter_subgoal(self, data, subgoal_name): 
+    def filter_subgoal(self, data, subgoal_name):
         '''
-        Filter a loaded json to only include examples from a specific type of subgoal. 
+        Filter a loaded json to only include examples from a specific type of subgoal.
         '''
-        # First get idx of segments where specified subgoal takes place. 
+        # First get idx of segments where specified subgoal takes place.
         valid_idx = set()
-        
+
         for subgoal in data['plan']['high_pddl']:
-            
+
             curr_subgoal = subgoal['discrete_action']['action']
 
-            if curr_subgoal == subgoal_name or curr_subgoal == 'NoOp': 
+            if curr_subgoal == subgoal_name or curr_subgoal == 'NoOp':
                 valid_idx.add(subgoal['high_idx'])
 
-        if len(valid_idx) == 0: 
+        if len(valid_idx) == 0:
             return None
 
-        # Filter language instructions. 
-        try: 
+        # Filter language instructions.
+        try:
             data['num']['lang_instr'] = [data['num']['lang_instr'][idx] for idx in (valid_idx - set([max(valid_idx)]))]
-        except: 
+        except:
             pdb.set_trace()
             exit()
 
-        # Filter low level actions. 
+        # Filter low level actions.
         data['plan']['low_actions'] = [a for a in data['plan']['low_actions'] if a['high_idx'] in valid_idx]
 
-        # Filter images. 
+        # Filter images.
         data['images'] = [img for img in data['images'] if img['high_idx'] in valid_idx]
-        
-        # Fix image idx. 
+
+        # Fix image idx.
         low_idxs = sorted(list(set([img['low_idx'] for img in data['images']])))
-        
-        for img in data['images']: 
+
+        for img in data['images']:
             img['low_idx'] = low_idxs.index(img['low_idx'])
 
         # Filter action-low.
-        for i in range(len(data['num']['action_low'])): 
+        for i in range(len(data['num']['action_low'])):
             data['num']['action_low'][i] = [a for a in data['num']['action_low'][i] if a['high_idx'] in valid_idx]
 
         data['num']['action_low'] = [a for a in data['num']['action_low'] if len(a) > 0]
@@ -329,7 +335,7 @@ class Module(nn.Module):
         '''
         return os.path.join(self.args.data, ex['split'], *(ex['root'].split('/')[-2:]))
 
-    def iterate(self, data, batch_size, subgoal=None):
+    def iterate(self, data, batch_size, subgoal=None, train=True):
         '''
         breaks dataset into batch_size chunks for training
         '''
@@ -338,11 +344,18 @@ class Module(nn.Module):
             batch = [self.load_task_json(task, subgoal) for task in tasks]
             batch = [b for b in batch if b is not None]
 
-            if len(batch) == 0: 
+            if len(batch) == 0:
                 raise
 
             feat = self.featurize(batch)
             yield batch, feat
+
+            batch = [self.load_task_json(task, subgoal) for task in tasks]
+            batch = [b for b in batch if b is not None]
+
+            if train:
+                feat = self.featurize(batch, shuffle=self.shuffle)
+                yield batch, feat
 
     def zero_input(self, x, keep_end_token=True):
         '''
@@ -367,6 +380,7 @@ class Module(nn.Module):
         lr = init_lr * (0.1 ** (epoch // decay_epoch))
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+
 
     @classmethod
     def load(cls, fsave):

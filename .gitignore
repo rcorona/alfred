@@ -1,3 +1,8 @@
+*.pyc
+*.swp
+*.txt
+media/*
+LICENSE
 data/
 *.yml
 *.pkl

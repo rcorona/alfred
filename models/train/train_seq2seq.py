@@ -4,9 +4,10 @@ import sys
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT']))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'models'))
 sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'gen'))
+sys.path.append(os.path.join(os.environ['ALFRED_ROOT'], 'data'))
 
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+#os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+#os.environ["CUDA_VISIBLE_DEVICES"]="2"
 
 import os
 import torch
@@ -18,9 +19,21 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from models.utils.helper_utils import optimizer_to
 
 
+def add_data_args(parser):
+    parser.add_argument('--data', help='dataset folder', default='data/json_feat_2.1.0')
+    parser.add_argument('--splits', help='json file containing train/dev/test splits', default='splits/oct21.json')
+    parser.add_argument('--preprocess', help='store preprocessed data to json files', action='store_true')
+    parser.add_argument('--pp_folder', help='folder name for preprocessed data', default='pp')
+    parser.add_argument('--preloaded_dataset', help='Path to preloaded json dataset, set to save time from diskread overhead.', default=None)
+
+    # debugging
+    parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
+    parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
+
 if __name__ == '__main__':
     # parser
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
+    # add_data_args(parser)
 
     # settings
     parser.add_argument('--seed', help='random seed', default=123, type=int)
@@ -33,6 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', help='use gpu', action='store_true')
     parser.add_argument('--dout', help='where to save model', default='exp/model:{model}')
     parser.add_argument('--resume', help='load a checkpoint')
+    parser.add_argument('--num_workers', type=int, default=8, help='number of threads to use in DataLoaders')
 
     # hyper parameters
     parser.add_argument('--batch', help='batch size', default=8, type=int)
@@ -47,6 +61,7 @@ if __name__ == '__main__':
     parser.add_argument('--action_loss_wt', help='weight of action loss', default=1., type=float)
     parser.add_argument('--subgoal_aux_loss_wt', help='weight of subgoal completion predictor', default=0., type=float)
     parser.add_argument('--pm_aux_loss_wt', help='weight of progress monitor', default=0., type=float)
+    parser.add_argument('--lang_model', help='Type of language  modeling to use.', default='default', type=str, choices=['default', 'bert'])
 
     # dropouts
     parser.add_argument('--zero_goal', help='zero out goal language', action='store_true')
@@ -61,20 +76,18 @@ if __name__ == '__main__':
     # other settings
     parser.add_argument('--dec_teacher_forcing', help='use gpu', action='store_true')
     parser.add_argument('--temp_no_history', help='use gpu', action='store_true')
+    parser.add_argument('--complex_batching_shuffle', help='number of times to shuffle for complex batching', default=0, type=int)
 
     # Custom parameters.
     parser.add_argument('--subgoal', help='Train only a single subgoal.', default=None, type=str)
-
-    # debugging
     parser.add_argument('--fast_epoch', help='fast epoch during debugging', action='store_true')
     parser.add_argument('--dataset_fraction', help='use fraction of the dataset for debugging (0 indicates full size)', default=0, type=int)
-
     # args and init
     args = parser.parse_args()
     args.dout = args.dout.format(**vars(args))
     torch.manual_seed(args.seed)
-
     # check if dataset has been preprocessed
+
     if not os.path.exists(os.path.join(args.data, "%s.vocab" % args.pp_folder)) and not args.preprocess:
         raise Exception("Dataset not processed; run with --preprocess")
 
@@ -84,6 +97,7 @@ if __name__ == '__main__':
         os.makedirs(args.dout)
 
     # load train/valid/tests splits
+    print(args.splits)
     with open(args.splits) as f:
         splits = json.load(f)
         pprint.pprint({k: len(v) for k, v in splits.items()})
@@ -98,6 +112,7 @@ if __name__ == '__main__':
         vocab = torch.load(os.path.join(args.data, "%s.vocab" % args.pp_folder))
 
     # load model
+    print(args.model)
     M = import_module('models.model.{}'.format(args.model))
     if args.resume:
         print("Loading: " + args.resume)

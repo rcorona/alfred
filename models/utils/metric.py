@@ -1,7 +1,8 @@
 import re
 import string
 import collections
-
+import pdb
+import editdistance
 
 def normalize_answer(s):
     """
@@ -32,6 +33,7 @@ def get_tokens(s):
 
 
 def compute_exact(a_gold, a_pred):
+    #pdb.set_trace()
     return int(normalize_answer(a_gold) == normalize_answer(a_pred))
 
 
@@ -49,3 +51,8 @@ def compute_f1(a_gold, a_pred):
     recall = 1.0 * num_same / len(gold_toks)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
+
+def compute_edit_distance(a_gold, a_pred):
+    gold_toks = get_tokens(a_gold)
+    pred_toks = get_tokens(a_pred)
+    return editdistance.eval(gold_toks, pred_toks)
